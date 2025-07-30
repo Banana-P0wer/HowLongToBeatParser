@@ -2,7 +2,7 @@ import re
 import json
 import requests
 from bs4 import BeautifulSoup
-from typing import Optional, Dict
+from typing import Optional, Dict, Any, List
 
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -29,20 +29,28 @@ def normalize_time_text(s: str) -> str:
     return " ".join(s.replace("\xa0", " ").strip().split())
 
 
-def fetch_html(url: str) -> str:
+def fetch_html(url: str) -> Optional[str]:
     headers = {
         "User-Agent": USER_AGENT,
-        "Accept-Language": "en-US,en;q=0.9"
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Connection": "keep-alive",
     }
-    resp = requests.get(url, headers=headers, timeout=20)
-    resp.raise_for_status()
+    try:
+        resp = requests.get(url, headers=headers, timeout=20)
+    except requests.RequestException:
+        return None
+    if resp.status_code != 200:
+        return None
     return resp.text
 
 
 def parse_name_from_page(soup: BeautifulSoup) -> Optional[str]:
     div = soup.find("div", class_=re.compile(r"GameHeader_profile_header__.*"))
-    if div and div.get_text(strip=True):
-        return div.get_text(strip=True)
+    if div:
+        text = div.get_text(strip=True)
+        if text:
+            return text
     for tag in soup.find_all("script", attrs={"type": "application/ld+json"}):
         if not tag.string:
             continue
@@ -60,64 +68,76 @@ def parse_name_from_page(soup: BeautifulSoup) -> Optional[str]:
 
 
 def parse_hours(text: str) -> Optional[float]:
-    """Преобразует строку времени в часы (float)."""
-    text = text.strip().lower().replace('\xa0', ' ')
+    text = text.strip().lower().replace("\xa0", " ")
 
-    # 43½ Hours → 43.5
-    if match := re.match(r"(\d+)\s*½\s*hour", text):
-        return float(match.group(1)) + 0.5
+    m = re.match(r"^(\d+)\s*½\s*hour", text)
+    if m:
+        return float(m.group(1)) + 0.5
 
-    # ½ Hours → 0.5
     if re.match(r"^½\s*hour", text):
         return 0.5
 
-    # 18 Mins или 18 Minutes → 0.3
-    if match := re.match(r"(\d+)\s*(min|minute)", text):
-        return round(int(match.group(1)) / 60, 2)
+    m = re.match(r"^(\d+)\s*(mins?|minutes?)\b", text)
+    if m:
+        return round(int(m.group(1)) / 60.0, 2)
 
-    # 43 Hours или 1 Hour → 43
-    if match := re.match(r"(\d+)\s*hour", text):
-        return float(match.group(1))
+    m = re.match(r"^(\d+)\s*hours?", text)
+    if m:
+        return float(m.group(1))
 
-    # 1h 30m
-    if match := re.match(r"(\d+)\s*h\s*(\d+)\s*m", text):
-        hours = int(match.group(1))
-        minutes = int(match.group(2))
-        return round(hours + minutes / 60, 2)
+    m = re.match(r"^(\d+)\s*h\s*(\d+)\s*m", text)
+    if m:
+        hours = int(m.group(1))
+        minutes = int(m.group(2))
+        return round(hours + minutes / 60.0, 2)
 
-    # fallback: нет совпадения
     return None
 
 
 def parse_times_from_page(soup: BeautifulSoup) -> Dict[str, Optional[float]]:
     result = {v: None for v in TIME_LABELS.values()}
+    time_token_re = re.compile(r"(hours?|mins?|minutes?)", re.I)
 
     for label, key in TIME_LABELS.items():
         label_node = soup.find(string=re.compile(rf"^{re.escape(label)}$", re.I))
-        if label_node:
-            container = label_node.find_parent()
-            time_text = None
-            if container:
-                for s in container.stripped_strings:
-                    if s.strip() != label and re.search(r"(Hour|Minute|Min)", s, re.I):
-                        time_text = normalize_time_text(s)
-                        break
-            if not time_text:
-                sibling = label_node.find_next(string=re.compile(r"(Hour|Minute|Min)", re.I))
-                if sibling:
-                    time_text = normalize_time_text(sibling.strip())
-            if time_text:
-                result[key] = parse_hours(time_text)
+        if not label_node:
+            continue
+
+        time_text = None
+
+        container = label_node.find_parent()
+        if container:
+            for s in container.stripped_strings:
+                if s.strip() != label and time_token_re.search(s):
+                    time_text = normalize_time_text(s)
+                    break
+
+        if not time_text:
+            sibling = label_node.find_next(string=time_token_re)
+            if sibling:
+                time_text = normalize_time_text(str(sibling))
+
+        if time_text:
+            result[key] = parse_hours(time_text)
+
     return result
 
 
-def parse_hltb_game(url: str) -> Dict[str, Optional[float]]:
-    game_id = extract_id_from_url(url)
+def parse_hltb_game(url: str) -> Optional[Dict[str, Any]]:
     html = fetch_html(url)
-    soup = BeautifulSoup(html, "html.parser")
+    if not html:
+        return None  # «тихий» пропуск отсутствующих страниц и сетевых ошибок
 
+    soup = BeautifulSoup(html, "html.parser")
     name = parse_name_from_page(soup)
+    if not name:
+        return None  # если имя не извлечено, тоже пропускаем запись
+
     times = parse_times_from_page(soup)
+    try:
+        game_id = extract_id_from_url(url)
+    except ValueError:
+        return None
 
     return {
         "id": str(game_id),
@@ -127,7 +147,8 @@ def parse_hltb_game(url: str) -> Dict[str, Optional[float]]:
 
 
 if __name__ == "__main__":
-    urls = [
+    urls: List[str] = [
+        "https://howlongtobeat.com/game/10",  # несуществующий → будет тихо пропущен
         "https://howlongtobeat.com/game/82645",  # пример с Mins
         "https://howlongtobeat.com/game/7231",
         "https://howlongtobeat.com/game/17250",
@@ -136,6 +157,8 @@ if __name__ == "__main__":
     results = []
     for url in urls:
         data = parse_hltb_game(url)
+        if data is None:
+            continue
         results.append(data)
 
     print(json.dumps(results, ensure_ascii=False, indent=2))
