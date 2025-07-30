@@ -5,6 +5,7 @@ from bs4 import BeautifulSoup
 from typing import Optional, Dict, Any
 import csv
 import traceback
+import os
 from time import sleep
 
 CSV_PATH = "hltb_dataset.csv"
@@ -182,20 +183,38 @@ def parse_hltb_game(url: str) -> Optional[Dict[str, Any]]:
     }
 
 
-if __name__ == "__main__":
-    start_id = 0
-    end_id = 100
+def get_last_processed_id() -> int:
+    """Читает последний обработанный ID из CSV, если файл существует."""
+    if not os.path.exists(CSV_PATH):
+        return 0
+    last_id = 0
+    with open(CSV_PATH, "r", encoding="utf-8-sig") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            try:
+                last_id = max(last_id, int(row["id"]))
+            except (KeyError, ValueError):
+                continue
+    return last_id
 
-    with open(CSV_PATH, "w", newline="", encoding="utf-8-sig") as f_csv, \
-            open(LOG_PATH, "w", encoding="utf-8") as f_log:
+
+if __name__ == "__main__":
+    start_id = get_last_processed_id() + 1
+    end_id = start_id + 1000  # можно изменить диапазон
+
+    file_exists = os.path.exists(CSV_PATH)
+
+    with open(CSV_PATH, "a", newline="", encoding="utf-8-sig") as f_csv, \
+            open(LOG_PATH, "a", encoding="utf-8") as f_log:
 
         writer = csv.DictWriter(
             f_csv,
             fieldnames=CSV_HEADERS,
-            quoting=csv.QUOTE_ALL,  # все значения будут в кавычках
-            escapechar='\\',  # экранируем спецсимволы
+            quoting=csv.QUOTE_ALL,
+            escapechar='\\'
         )
-        writer.writeheader()
+        if not file_exists:
+            writer.writeheader()
 
         for i in range(start_id, end_id):
             url = f"https://howlongtobeat.com/game/{i}"
@@ -203,20 +222,17 @@ if __name__ == "__main__":
             try:
                 data = parse_hltb_game(url)
                 if data is None:
-                    log_msg = f"[SKIP] ID {i} — нет данных или 404\n"
-                    f_log.write(log_msg)
+                    f_log.write(f"[SKIP] ID {i} — нет данных или 404\n")
                     continue
 
                 writer.writerow(data)
                 log_msg = f"[OK]   ID {i} — {data.get('name')}\n"
                 f_log.write(log_msg)
-                print(log_msg.strip())  # выводим в консоль только успешные
+                print(log_msg.strip())
 
             except Exception as e:
-                log_msg = f"[ERROR] ID {i} — {repr(e)}\n"
-                f_log.write(log_msg)
+                f_log.write(f"[ERROR] ID {i} — {repr(e)}\n")
                 f_log.write(traceback.format_exc() + "\n")
                 continue
 
             sleep(0.3)
-
