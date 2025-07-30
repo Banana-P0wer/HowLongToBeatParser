@@ -173,15 +173,10 @@ def parse_hltb_game(url: str) -> Optional[Dict[str, Any]]:
 
 
 if __name__ == "__main__":
-    urls: List[str] = [
-        "https://howlongtobeat.com/game/10",
-        "https://howlongtobeat.com/game/82645",
-        "https://howlongtobeat.com/game/7231",
-        "https://howlongtobeat.com/game/17250",
-    ]
-
+    urls: List[str] = []
     results = []
-    for url in urls:
+    for i in range(0, 40):
+        url = f"https://howlongtobeat.com/game/{i}"
         data = parse_hltb_game(url)
         if data is None:
             continue
