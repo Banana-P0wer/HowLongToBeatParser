@@ -2,8 +2,18 @@ import re
 import json
 import requests
 from bs4 import BeautifulSoup
-from typing import Optional, Dict, Any, List
-from datetime import datetime
+from typing import Optional, Dict, Any
+import csv
+import traceback
+from time import sleep
+
+CSV_PATH = "hltb_dataset.csv"
+LOG_PATH = "hltb_errors.log"
+
+CSV_HEADERS = [
+    "id", "name", "release_date",
+    "main_story", "main_plus_sides", "completionist", "all_styles"
+]
 
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -173,13 +183,40 @@ def parse_hltb_game(url: str) -> Optional[Dict[str, Any]]:
 
 
 if __name__ == "__main__":
-    urls: List[str] = []
-    results = []
-    for i in range(0, 40):
-        url = f"https://howlongtobeat.com/game/{i}"
-        data = parse_hltb_game(url)
-        if data is None:
-            continue
-        results.append(data)
+    start_id = 0
+    end_id = 100
 
-    print(json.dumps(results, ensure_ascii=False, indent=2))
+    with open(CSV_PATH, "w", newline="", encoding="utf-8-sig") as f_csv, \
+            open(LOG_PATH, "w", encoding="utf-8") as f_log:
+
+        writer = csv.DictWriter(
+            f_csv,
+            fieldnames=CSV_HEADERS,
+            quoting=csv.QUOTE_ALL,  # все значения будут в кавычках
+            escapechar='\\',  # экранируем спецсимволы
+        )
+        writer.writeheader()
+
+        for i in range(start_id, end_id):
+            url = f"https://howlongtobeat.com/game/{i}"
+
+            try:
+                data = parse_hltb_game(url)
+                if data is None:
+                    log_msg = f"[SKIP] ID {i} — нет данных или 404\n"
+                    f_log.write(log_msg)
+                    continue
+
+                writer.writerow(data)
+                log_msg = f"[OK]   ID {i} — {data.get('name')}\n"
+                f_log.write(log_msg)
+                print(log_msg.strip())  # выводим в консоль только успешные
+
+            except Exception as e:
+                log_msg = f"[ERROR] ID {i} — {repr(e)}\n"
+                f_log.write(log_msg)
+                f_log.write(traceback.format_exc() + "\n")
+                continue
+
+            sleep(0.3)
+
