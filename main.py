@@ -3,6 +3,7 @@ import json
 import requests
 from bs4 import BeautifulSoup
 from typing import Optional, Dict, Any, List
+from datetime import datetime
 
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -123,17 +124,41 @@ def parse_times_from_page(soup: BeautifulSoup) -> Dict[str, Optional[float]]:
     return result
 
 
+def parse_release_date(soup: BeautifulSoup) -> Optional[str]:
+    divs = soup.find_all("div", class_=re.compile(r"GameSummary_profile_info__.*"))
+    for div in divs:
+        text = " ".join(div.stripped_strings)
+        if text.startswith("NA:") or text.startswith("WW:"):
+            # Пример: "NA: August 26th, 2020"
+            m = re.search(r"(?:NA|WW):\s*([A-Za-z]+)\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})", text, re.I)
+            if m:
+                month_name = m.group(1).lower()
+                day = int(m.group(2))
+                year = int(m.group(3))
+                MONTHS = {
+                    "january": 1, "february": 2, "march": 3, "april": 4,
+                    "may": 5, "june": 6, "july": 7, "august": 8,
+                    "september": 9, "october": 10, "november": 11, "december": 12
+                }
+                month = MONTHS.get(month_name)
+                if month:
+                    return f"{year:04d}-{month:02d}-{day:02d}"
+    return None
+
+
 def parse_hltb_game(url: str) -> Optional[Dict[str, Any]]:
     html = fetch_html(url)
     if not html:
-        return None  # «тихий» пропуск отсутствующих страниц и сетевых ошибок
+        return None
 
     soup = BeautifulSoup(html, "html.parser")
     name = parse_name_from_page(soup)
     if not name:
-        return None  # если имя не извлечено, тоже пропускаем запись
+        return None
 
     times = parse_times_from_page(soup)
+    release_date = parse_release_date(soup)
+
     try:
         game_id = extract_id_from_url(url)
     except ValueError:
@@ -142,14 +167,15 @@ def parse_hltb_game(url: str) -> Optional[Dict[str, Any]]:
     return {
         "id": str(game_id),
         "name": name,
+        "release_date": release_date,
         **times
     }
 
 
 if __name__ == "__main__":
     urls: List[str] = [
-        "https://howlongtobeat.com/game/10",  # несуществующий → будет тихо пропущен
-        "https://howlongtobeat.com/game/82645",  # пример с Mins
+        "https://howlongtobeat.com/game/10",
+        "https://howlongtobeat.com/game/82645",
         "https://howlongtobeat.com/game/7231",
         "https://howlongtobeat.com/game/17250",
     ]
