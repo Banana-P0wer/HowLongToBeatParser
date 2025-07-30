@@ -26,7 +26,7 @@ def extract_id_from_url(url: str) -> int:
 
 
 def normalize_time_text(s: str) -> str:
-    return " ".join(s.replace("\xa0", " ").split())
+    return " ".join(s.replace("\xa0", " ").strip().split())
 
 
 def fetch_html(url: str) -> str:
@@ -40,11 +40,9 @@ def fetch_html(url: str) -> str:
 
 
 def parse_name_from_page(soup: BeautifulSoup) -> Optional[str]:
-    # Новый вариант: название в div с классом GameHeader_profile_header__q_PID
     div = soup.find("div", class_=re.compile(r"GameHeader_profile_header__.*"))
     if div and div.get_text(strip=True):
         return div.get_text(strip=True)
-    # Резерв – JSON-LD
     for tag in soup.find_all("script", attrs={"type": "application/ld+json"}):
         if not tag.string:
             continue
@@ -61,27 +59,59 @@ def parse_name_from_page(soup: BeautifulSoup) -> Optional[str]:
     return None
 
 
-def parse_times_from_page(soup: BeautifulSoup) -> Dict[str, Optional[str]]:
+def parse_hours(text: str) -> Optional[float]:
+    """Преобразует строку времени в часы (float)."""
+    text = text.strip().lower().replace('\xa0', ' ')
+
+    # 43½ Hours → 43.5
+    if match := re.match(r"(\d+)\s*½\s*hour", text):
+        return float(match.group(1)) + 0.5
+
+    # ½ Hours → 0.5
+    if re.match(r"^½\s*hour", text):
+        return 0.5
+
+    # 18 Mins или 18 Minutes → 0.3
+    if match := re.match(r"(\d+)\s*(min|minute)", text):
+        return round(int(match.group(1)) / 60, 2)
+
+    # 43 Hours или 1 Hour → 43
+    if match := re.match(r"(\d+)\s*hour", text):
+        return float(match.group(1))
+
+    # 1h 30m
+    if match := re.match(r"(\d+)\s*h\s*(\d+)\s*m", text):
+        hours = int(match.group(1))
+        minutes = int(match.group(2))
+        return round(hours + minutes / 60, 2)
+
+    # fallback: нет совпадения
+    return None
+
+
+def parse_times_from_page(soup: BeautifulSoup) -> Dict[str, Optional[float]]:
     result = {v: None for v in TIME_LABELS.values()}
 
     for label, key in TIME_LABELS.items():
         label_node = soup.find(string=re.compile(rf"^{re.escape(label)}$", re.I))
         if label_node:
-            # Ищем ближайший элемент с временем
             container = label_node.find_parent()
+            time_text = None
             if container:
                 for s in container.stripped_strings:
-                    if s.strip() != label and re.search(r"(Hour|Minute)", s, re.I):
-                        result[key] = normalize_time_text(s)
+                    if s.strip() != label and re.search(r"(Hour|Minute|Min)", s, re.I):
+                        time_text = normalize_time_text(s)
                         break
-            if not result[key]:
-                sibling = label_node.find_next(string=re.compile(r"(Hour|Minute)", re.I))
+            if not time_text:
+                sibling = label_node.find_next(string=re.compile(r"(Hour|Minute|Min)", re.I))
                 if sibling:
-                    result[key] = normalize_time_text(sibling.strip())
+                    time_text = normalize_time_text(sibling.strip())
+            if time_text:
+                result[key] = parse_hours(time_text)
     return result
 
 
-def parse_hltb_game(url: str) -> Dict[str, Optional[str]]:
+def parse_hltb_game(url: str) -> Dict[str, Optional[float]]:
     game_id = extract_id_from_url(url)
     html = fetch_html(url)
     soup = BeautifulSoup(html, "html.parser")
@@ -98,7 +128,7 @@ def parse_hltb_game(url: str) -> Dict[str, Optional[str]]:
 
 if __name__ == "__main__":
     urls = [
-        "https://howlongtobeat.com/game/166252",
+        "https://howlongtobeat.com/game/82645",  # пример с Mins
         "https://howlongtobeat.com/game/7231",
         "https://howlongtobeat.com/game/17250",
     ]
@@ -109,4 +139,3 @@ if __name__ == "__main__":
         results.append(data)
 
     print(json.dumps(results, ensure_ascii=False, indent=2))
-
