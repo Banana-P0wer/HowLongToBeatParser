@@ -91,17 +91,19 @@ def parse_hours(text: str) -> Optional[float]:
 
     m = re.match(r"^(\d+)\s*(mins?|minutes?)\b", text)
     if m:
-        return round(int(m.group(1)) / 60.0, 2)
+        value = round(int(m.group(1)) / 60.0, 1)
+        return int(value) if value.is_integer() else value
 
     m = re.match(r"^(\d+)\s*hours?", text)
     if m:
-        return float(m.group(1))
+        return int(m.group(1))
 
     m = re.match(r"^(\d+)\s*h\s*(\d+)\s*m", text)
     if m:
         hours = int(m.group(1))
         minutes = int(m.group(2))
-        return round(hours + minutes / 60.0, 2)
+        value = round(hours + minutes / 60.0, 1)
+        return int(value) if value.is_integer() else value
 
     return None
 
@@ -184,7 +186,6 @@ def parse_hltb_game(url: str) -> Optional[Dict[str, Any]]:
 
 
 def get_last_processed_id() -> int:
-    """Читает последний обработанный ID из CSV, если файл существует."""
     if not os.path.exists(CSV_PATH):
         return 0
     last_id = 0
