@@ -162,15 +162,36 @@ def parse_release_date(soup: BeautifulSoup) -> Optional[str]:
     return None
 
 
-def parse_hltb_game(url: str) -> Optional[Dict[str, Any]]:
+def parse_skip_reason(soup: BeautifulSoup) -> Optional[str]:
+    # Ищем блоки примечаний и проверяем наличие ключевых меток
+    for div in soup.find_all("div", class_=re.compile(r"GameSummary_profile_info__.*")):
+        text = " ".join(div.stripped_strings).lower()
+        if "note:" in text:
+            if "dlc/expansion" in text:
+                return "DLC/Expansion"
+            if "multiplayer focused" in text:
+                return "Multiplayer Focused"
+    return None
+
+
+def parse_hltb_game(url: str) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
     html = fetch_html(url)
     if not html:
-        return None
+        return None, None
 
     soup = BeautifulSoup(html, "html.parser")
+
+    # сначала имя — пригодится для логов даже при пропуске
+    name = parse_name_from_page(soup)
+
+    skip_reason = parse_skip_reason(soup)
+    if skip_reason:
+        pretty_reason = f"{name} — {skip_reason}" if name else skip_reason
+        return None, pretty_reason
+
     name = parse_name_from_page(soup)
     if not name:
-        return None
+        return None, None
 
     times = parse_times_from_page(soup)
     release_date = parse_release_date(soup)
@@ -178,14 +199,15 @@ def parse_hltb_game(url: str) -> Optional[Dict[str, Any]]:
     try:
         game_id = extract_id_from_url(url)
     except ValueError:
-        return None
+        return None, None
 
-    return {
+    return ({
         "id": str(game_id),
         "name": name,
         "release_date": release_date,
         **times
     }
+    }, None)
 
 
 def get_last_processed_id() -> int:
@@ -238,7 +260,12 @@ if __name__ == "__main__":
         for i in range(start_id, end_id):
             url = f"https://howlongtobeat.com/game/{i}"
             try:
-                data = parse_hltb_game(url)
+                data, skip_reason = parse_hltb_game(url)
+
+                if skip_reason:
+                    f_log.write(f"[SKIP-NOTE] ID {i} — {skip_reason}\n")
+                    continue
+
                 if data is None:
                     f_log.write(f"[SKIP] ID {i} — нет данных или 404\n")
                     continue
@@ -254,3 +281,4 @@ if __name__ == "__main__":
                 continue
 
             sleep(0.3)
+
