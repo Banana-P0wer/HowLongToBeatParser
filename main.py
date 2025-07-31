@@ -113,29 +113,48 @@ def parse_hours(text: str) -> Optional[float]:
 
 def parse_times_from_page(soup: BeautifulSoup) -> Dict[str, Optional[float]]:
     result = {v: None for v in TIME_LABELS.values()}
-    time_token_re = re.compile(r"(hours?|mins?|minutes?)", re.I)
 
-    for label, key in TIME_LABELS.items():
-        label_node = soup.find(string=re.compile(rf"^{re.escape(label)}$", re.I))
-        if not label_node:
+    stats = soup.find("div", class_=re.compile(r"GameStats_game_times__.*"))
+    if not stats:
+        return result
+
+    label_map_core = {
+        "main story": "main_story",
+        "main + sides": "main_plus_sides",
+        "completionist": "completionist",
+        "all styles": "all_styles",
+    }
+    label_map_extra = {
+        "single-player": "single_player",
+        "single player": "single_player",
+        "singleplayer": "single_player",
+        "co-op": "co_op",
+        "coop": "co_op",
+        "vs.": "versus",
+        "versus": "versus",
+    }
+
+    extra: Dict[str, Optional[float]] = {}
+
+    for li in stats.find_all("li"):
+        h4 = li.find("h4")
+        h5 = li.find("h5")
+        if not h4 or not h5:
             continue
 
-        time_text = None
+        label = h4.get_text(" ", strip=True).strip().lower()
+        value_text = h5.get_text(" ", strip=True)  # только значение в рамках текущего li
 
-        container = label_node.find_parent()
-        if container:
-            for s in container.stripped_strings:
-                if s.strip() != label and time_token_re.search(s):
-                    time_text = normalize_time_text(s)
-                    break
+        if label in label_map_core:
+            result[label_map_core[label]] = parse_hours(value_text)
+        elif label in label_map_extra:
+            extra[label_map_extra[label]] = parse_hours(value_text)
 
-        if not time_text:
-            sibling = label_node.find_next(string=time_token_re)
-            if sibling:
-                time_text = normalize_time_text(str(sibling))
+    if result.get("main_story") is None and extra.get("single_player") is not None:
+        result["main_story"] = extra["single_player"]
 
-        if time_text:
-            result[key] = parse_hours(time_text)
+    # если ты ведёшь отдельные столбцы для сетевых режимов — это сохранит их
+    result.update(extra)
 
     return result
 
