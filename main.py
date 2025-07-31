@@ -7,6 +7,7 @@ import csv
 import traceback
 import os
 from time import sleep
+import argparse
 
 CSV_PATH = "hltb_dataset.csv"
 LOG_PATH = "hltb_errors.log"
@@ -202,13 +203,26 @@ def get_last_processed_id() -> int:
 
 
 if __name__ == "__main__":
-    start_id = get_last_processed_id() + 1
-    end_id = start_id + 1000  # можно изменить диапазон
+    parser = argparse.ArgumentParser(prog="hltb-parser", description="HowLongToBeat CSV parser")
+    parser.add_argument("count", nargs="?", type=int, default=1000,
+                        help="сколько ID обработать подряд, по умолчанию 1000")
+    parser.add_argument("--start", type=int, default=None,
+                        help="необязательный стартовый ID; если не задан, берётся из CSV")
+    args = parser.parse_args()
+
+    # определяем старт
+    if args.start is not None and args.start > 0:
+        start_id = args.start
+    else:
+        start_id = get_last_processed_id() + 1
+
+    # определяем финиш по аргументу count
+    end_id = start_id + max(0, args.count)
 
     file_exists = os.path.exists(CSV_PATH)
 
     with open(CSV_PATH, "a", newline="", encoding="utf-8-sig") as f_csv, \
-            open(LOG_PATH, "a", encoding="utf-8") as f_log:
+         open(LOG_PATH, "a", encoding="utf-8") as f_log:
 
         writer = csv.DictWriter(
             f_csv,
@@ -219,9 +233,10 @@ if __name__ == "__main__":
         if not file_exists:
             writer.writeheader()
 
+        f_log.write(f"[RESUME] start_id={start_id} count={args.count} end_id={end_id-1}\n")
+
         for i in range(start_id, end_id):
             url = f"https://howlongtobeat.com/game/{i}"
-
             try:
                 data = parse_hltb_game(url)
                 if data is None:
