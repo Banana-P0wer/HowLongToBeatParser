@@ -17,6 +17,8 @@ CSV_HEADERS = [
     "release_date", "release_precision", "release_year", "release_month", "release_day",
     "main_story", "main_plus_sides", "completionist", "all_styles",
     "single_player", "co_op", "versus",
+    "main_story_polled", "main_plus_sides_polled", "completionist_polled", "all_styles_polled",
+    "single_player_polled", "co_op_polled", "versus_polled",
 ]
 
 USER_AGENT = (
@@ -83,30 +85,62 @@ def parse_name_from_page(soup: BeautifulSoup) -> Optional[str]:
 
 
 def parse_hours(text: str) -> Optional[float]:
-    text = text.strip().lower().replace("\xa0", " ")
+    if not text:
+        return None
 
-    m = re.match(r"^(\d+)\s*½\s*hour", text)
+    raw = text.replace("\xa0", " ").strip().lower()
+    if raw in {"--", "-"}:
+        return None
+
+    # Диапазон: '... - ...' (разные тире)
+    if "-" in raw or "–" in raw or "—" in raw:
+        parts = re.split(r"\s*[-–—]\s*", raw)
+        if len(parts) == 2:
+            a = parse_hours(parts[0])
+            b = parse_hours(parts[1])
+            if a is not None and b is not None:
+                avg = round((a + b) / 2.0, 2)
+                return int(avg) if float(avg).is_integer() else avg
+
+    # 43½ hours → 43.5
+    m = re.match(r"^(\d+)\s*½\s*h(?:our)?s?\b", raw, flags=re.I)
     if m:
-        return float(m.group(1)) + 0.5
+        val = float(m.group(1)) + 0.5
+        return int(val) if float(val).is_integer() else val
 
-    if re.match(r"^½\s*hour", text):
+    # ½ hours → 0.5
+    if re.match(r"^½\s*h(?:our)?s?\b", raw, flags=re.I):
         return 0.5
 
-    m = re.match(r"^(\d+)\s*(mins?|minutes?)\b", text)
-    if m:
-        value = round(int(m.group(1)) / 60.0, 1)
-        return int(value) if value.is_integer() else value
-
-    m = re.match(r"^(\d+)\s*hours?", text)
-    if m:
-        return int(m.group(1))
-
-    m = re.match(r"^(\d+)\s*h\s*(\d+)\s*m", text)
+    # 1h 30m → 1.5
+    m = re.match(r"^(\d+)\s*h\s*(\d+)\s*m\b", raw, flags=re.I)
     if m:
         hours = int(m.group(1))
         minutes = int(m.group(2))
-        value = round(hours + minutes / 60.0, 1)
-        return int(value) if value.is_integer() else value
+        val = round(hours + minutes / 60.0, 2)
+        return int(val) if float(val).is_integer() else val
+
+    # 1h → 1
+    m = re.match(r"^(\d+)\s*h\b", raw, flags=re.I)
+    if m:
+        return int(m.group(1))
+
+    # 59m → 0.98
+    m = re.match(r"^(\d+)\s*m\b", raw, flags=re.I)
+    if m:
+        val = round(int(m.group(1)) / 60.0, 2)
+        return int(val) if float(val).is_integer() else val
+
+    # 57 mins / 90 minutes → часы
+    m = re.match(r"^(\d+)\s*(mins?|minutes?)\b", raw, flags=re.I)
+    if m:
+        val = round(int(m.group(1)) / 60.0, 2)
+        return int(val) if float(val).is_integer() else val
+
+    # 95 hours / 1 hour → 95 / 1
+    m = re.match(r"^(\d+)\s*h(?:our)?s?\b", raw, flags=re.I)
+    if m:
+        return int(m.group(1))
 
     return None
 
@@ -278,7 +312,11 @@ def parse_hltb_game(url: str) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
     if not name:
         return None, None
 
-    times = parse_times_from_page(soup)
+    times = parse_times_from_tables(soup)
+    if all(times[k] is None for k in ["main_story", "main_plus_sides", "completionist", "all_styles",
+                                      "single_player", "co_op", "versus"]):
+        # если таблиц нет/пусты — используем прежний верхний блок
+        times = parse_times_from_page(soup)
     release_date = parse_release_date(soup)
     release_info = parse_release_info(soup)  # Новый парсер, возвращает дополнительные поля
 
@@ -294,6 +332,121 @@ def parse_hltb_game(url: str) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
         **release_info,  # включает release_precision, release_year, release_month, release_day
         **times
     }, None)
+
+
+def parse_times_from_tables(soup: BeautifulSoup) -> Dict[str, Optional[float]]:
+    result: Dict[str, Optional[float]] = {
+        "main_story": None,
+        "main_plus_sides": None,
+        "completionist": None,
+        "all_styles": None,
+        "single_player": None,
+        "co_op": None,
+        "versus": None,
+
+        "main_story_polled": None,
+        "main_plus_sides_polled": None,
+        "completionist_polled": None,
+        "all_styles_polled": None,
+        "single_player_polled": None,
+        "co_op_polled": None,
+        "versus_polled": None,
+    }
+
+    tables = soup.find_all("table", class_=re.compile(r"GameTimeTable_game_main_table__"))
+    if not tables:
+        return result
+
+    def to_int(text: str) -> Optional[int]:
+        if not text:
+            return None
+        m = re.search(r"\d[\d,]*", text)  # «1,234»
+        if not m:
+            return None
+        try:
+            return int(m.group(0).replace(",", ""))
+        except ValueError:
+            return None
+
+    def set_core(row_label: str, avg_text: str, polled_text: str):
+        lbl = row_label.strip().lower()
+        key = None
+        if lbl in ("main story",):
+            key = "main_story"
+        elif lbl in ("main + extras", "main + sides"):
+            key = "main_plus_sides"
+        elif lbl == "completionist":
+            key = "completionist"
+        elif lbl in ("all playstyles", "all playstyles", "all playstyles".lower()):
+            key = "all_styles"
+        if key:
+            val = parse_hours(avg_text)
+            if val is not None:
+                result[key] = val
+            p = to_int(polled_text)
+            if p is not None:
+                result[f"{key}_polled"] = p
+
+    def set_multi(row_label: str, avg_text: str, polled_text: str):
+        lbl = row_label.strip().lower()
+        if lbl in ("single-player", "single player", "singleplayer"):
+            key = "single_player"
+        elif lbl in ("co-op", "coop"):
+            key = "co_op"
+        elif lbl in ("competitive", "vs.", "versus"):
+            key = "versus"
+        else:
+            key = None
+        if key:
+            val = parse_hours(avg_text)
+            if val is not None:
+                result[key] = val
+            p = to_int(polled_text)
+            if p is not None:
+                result[f"{key}_polled"] = p
+
+    for table in tables:
+        # Заголовок первой ячейки thead определяет секцию
+        head_first = table.find("thead")
+        section = None
+        if head_first:
+            first_td = head_first.find("td")
+            if first_td:
+                section = first_td.get_text(" ", strip=True).strip().lower()
+
+        # Колонки фиксированы: <td>Label</td><td>Polled</td><td>Average</td>...
+        tbody = table.find("tbody")
+        if not tbody:
+            continue
+
+        for tr in tbody.find_all("tr", class_=re.compile(r"spreadsheet")):
+            tds = tr.find_all("td")
+            if len(tds) < 3:
+                continue
+            label = tds[0].get_text(" ", strip=True)
+            polled_text = tds[1].get_text(" ", strip=True)
+            average_text = tds[2].get_text(" ", strip=True)
+
+            if not average_text or average_text.strip().lower() in {"--", "-"}:
+                avg_val = None
+            else:
+                avg_val = parse_hours(average_text)
+
+            if section == "single-player":
+                set_core(label, average_text, polled_text)
+                # Дополнительно сохраним агрегат как single_player, если это «Main Story»
+                if label.strip().lower() == "main story" and avg_val is not None:
+                    result["single_player"] = avg_val
+                    p = to_int(polled_text)
+                    if p is not None:
+                        result["single_player_polled"] = p
+            elif section == "multi-player":
+                set_multi(label, average_text, polled_text)
+            else:
+                # На случай новых секций — безопасно игнорируем
+                continue
+
+    return result
 
 
 def get_last_processed_id() -> int:
