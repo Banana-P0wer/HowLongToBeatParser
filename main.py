@@ -141,21 +141,23 @@ def parse_release_date(soup: BeautifulSoup) -> Optional[str]:
     divs = soup.find_all("div", class_=re.compile(r"GameSummary_profile_info__.*"))
     for div in divs:
         text = " ".join(div.stripped_strings)
-        if text.startswith("NA:") or text.startswith("WW:"):
-            # Пример: "NA: August 26th, 2020"
-            m = re.search(r"(?:NA|WW):\s*([A-Za-z]+)\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})", text, re.I)
-            if m:
-                month_name = m.group(1).lower()
-                day = int(m.group(2))
-                year = int(m.group(3))
-                MONTHS = {
-                    "january": 1, "february": 2, "march": 3, "april": 4,
-                    "may": 5, "june": 6, "july": 7, "august": 8,
-                    "september": 9, "october": 10, "november": 11, "december": 12
-                }
-                month = MONTHS.get(month_name)
-                if month:
-                    return f"{year:04d}-{month:02d}-{day:02d}"
+
+        # Дата с шаблоном "<2-3 буквы>: Month 17th, 2025"
+        m = re.search(r"([A-Z]{2,3}):\s*([A-Za-z]+)\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})", text, re.I)
+        if m:
+            month_name = m.group(2).lower()
+            day = int(m.group(3))
+            year = int(m.group(4))
+
+            MONTHS = {
+                "january": 1, "february": 2, "march": 3, "april": 4,
+                "may": 5, "june": 6, "july": 7, "august": 8,
+                "september": 9, "october": 10, "november": 11, "december": 12
+            }
+            month = MONTHS.get(month_name)
+            if month:
+                return f"{year:04d}-{month:02d}-{day:02d}"
+
     return None
 
 
