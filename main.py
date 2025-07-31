@@ -206,7 +206,6 @@ def parse_hltb_game(url: str) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
         "name": name,
         "release_date": release_date,
         **times
-    }
     }, None)
 
 
