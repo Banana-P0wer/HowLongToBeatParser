@@ -13,8 +13,10 @@ CSV_PATH = "hltb_dataset.csv"
 LOG_PATH = "hltb_errors.log"
 
 CSV_HEADERS = [
-    "id", "name", "release_date",
-    "main_story", "main_plus_sides", "completionist", "all_styles"
+    "id", "name",
+    "release_date", "release_precision", "release_year", "release_month", "release_day",
+    "main_story", "main_plus_sides", "completionist", "all_styles",
+    "single_player", "co_op", "versus",
 ]
 
 USER_AGENT = (
@@ -162,6 +164,72 @@ def parse_release_date(soup: BeautifulSoup) -> Optional[str]:
     return None
 
 
+def parse_release_info(soup: BeautifulSoup) -> Dict[str, Optional[str]]:
+    MONTHS = {
+        "january": 1, "february": 2, "march": 3, "april": 4,
+        "may": 5, "june": 6, "july": 7, "august": 8,
+        "september": 9, "october": 10, "november": 11, "december": 12
+    }
+
+    texts = []
+    for div in soup.find_all("div", class_=re.compile(r"GameSummary_profile_info__.*")):
+        txt = " ".join(div.stripped_strings)
+        if txt:
+            texts.append(txt)
+
+    for text in texts:
+        # 1) День, месяц, год: "<CC>: Month 8th, 2018"
+        m = re.search(r"[A-Z]{2,3}:\s*([A-Za-z]+)\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})", text, re.I)
+        if m:
+            month_name = m.group(1).lower()
+            day = int(m.group(2))
+            year = int(m.group(3))
+            month = MONTHS.get(month_name)
+            if month:
+                return {
+                    "release_date": f"{year:04d}-{month:02d}-{day:02d}",
+                    "release_precision": "day",
+                    "release_year": f"{year:04d}",
+                    "release_month": f"{month:02d}",
+                    "release_day": f"{day:02d}",
+                }
+
+        # 2) Месяц и год: "<CC>: Month 2019"
+        m = re.search(r"[A-Z]{2,3}:\s*([A-Za-z]+)\s+(\d{4})\b", text, re.I)
+        if m:
+            month_name = m.group(1).lower()
+            year = int(m.group(2))
+            month = MONTHS.get(month_name)
+            if month:
+                return {
+                    "release_date": f"{year:04d}-{month:02d}",
+                    "release_precision": "month",
+                    "release_year": f"{year:04d}",
+                    "release_month": f"{month:02d}",
+                    "release_day": None,
+                }
+
+        # 3) Только год: "<CC>: 2012"
+        m = re.search(r"[A-Z]{2,3}:\s*(\d{4})\b", text)
+        if m:
+            year = int(m.group(1))
+            return {
+                "release_date": f"{year:04d}",
+                "release_precision": "year",
+                "release_year": f"{year:04d}",
+                "release_month": None,
+                "release_day": None,
+            }
+
+    return {
+        "release_date": None,
+        "release_precision": None,
+        "release_year": None,
+        "release_month": None,
+        "release_day": None,
+    }
+
+
 def parse_skip_reason(soup: BeautifulSoup) -> Optional[str]:
     # Ищем блоки примечаний и проверяем наличие ключевых меток
     for div in soup.find_all("div", class_=re.compile(r"GameSummary_profile_info__.*")):
@@ -181,7 +249,6 @@ def parse_hltb_game(url: str) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
 
     soup = BeautifulSoup(html, "html.parser")
 
-    # сначала имя — пригодится для логов даже при пропуске
     name = parse_name_from_page(soup)
 
     skip_reason = parse_skip_reason(soup)
@@ -189,12 +256,12 @@ def parse_hltb_game(url: str) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
         pretty_reason = f"{name} — {skip_reason}" if name else skip_reason
         return None, pretty_reason
 
-    name = parse_name_from_page(soup)
     if not name:
         return None, None
 
     times = parse_times_from_page(soup)
     release_date = parse_release_date(soup)
+    release_info = parse_release_info(soup)  # Новый парсер, возвращает дополнительные поля
 
     try:
         game_id = extract_id_from_url(url)
@@ -205,6 +272,7 @@ def parse_hltb_game(url: str) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
         "id": str(game_id),
         "name": name,
         "release_date": release_date,
+        **release_info,  # включает release_precision, release_year, release_month, release_day
         **times
     }, None)
 
