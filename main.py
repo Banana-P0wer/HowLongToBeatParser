@@ -13,12 +13,12 @@ CSV_PATH = "hltb_dataset.csv"
 LOG_PATH = "hltb_errors.log"
 
 CSV_HEADERS = [
-    "id", "name",
-    "release_date", "release_precision", "release_year", "release_month", "release_day",
-    "main_story", "main_plus_sides", "completionist", "all_styles",
-    "single_player", "co_op", "versus",
-    "main_story_polled", "main_plus_sides_polled", "completionist_polled", "all_styles_polled",
-    "single_player_polled", "co_op_polled", "versus_polled",
+    "id", "name", "type",
+    "release_date",
+    "main_story_polled", "main_story", "main_plus_sides_polled", "main_plus_sides", "completionist_polled",
+    "completionist", "all_styles_polled", "all_styles", "single_player_polled", "single_player",
+    "co_op_polled", "co_op", "versus_polled", "versus",
+    "release_precision", "release_year", "release_month", "release_day",
 ]
 
 USER_AGENT = (
@@ -283,16 +283,19 @@ def parse_release_info(soup: BeautifulSoup) -> Dict[str, Optional[str]]:
     }
 
 
-def parse_skip_reason(soup: BeautifulSoup) -> Optional[str]:
-    # Ищем блоки примечаний и проверяем наличие ключевых меток
+def detect_content_type(soup: BeautifulSoup) -> str:
+    flags = []
     for div in soup.find_all("div", class_=re.compile(r"GameSummary_profile_info__.*")):
         text = " ".join(div.stripped_strings).lower()
         if "note:" in text:
             if "dlc/expansion" in text:
-                return "DLC/Expansion"
+                flags.append("dlc/expansion")
             if "multiplayer focused" in text:
-                return "Multiplayer Focused"
-    return None
+                flags.append("multiplayer focused")
+    if not flags:
+        return "game"
+    # уникализируем и объединяем
+    return "; ".join(sorted(set(flags)))
 
 
 def parse_hltb_game(url: str) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
@@ -303,22 +306,19 @@ def parse_hltb_game(url: str) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
     soup = BeautifulSoup(html, "html.parser")
 
     name = parse_name_from_page(soup)
-
-    skip_reason = parse_skip_reason(soup)
-    if skip_reason:
-        pretty_reason = f"{name} — {skip_reason}" if name else skip_reason
-        return None, pretty_reason
-
     if not name:
         return None, None
+
+    content_type = detect_content_type(soup)  # новый тип
 
     times = parse_times_from_tables(soup)
     if all(times[k] is None for k in ["main_story", "main_plus_sides", "completionist", "all_styles",
                                       "single_player", "co_op", "versus"]):
-        # если таблиц нет/пусты — используем прежний верхний блок
         times = parse_times_from_page(soup)
+
+    # старая точная дата (для совместимости) + расширенная информация о точности
     release_date = parse_release_date(soup)
-    release_info = parse_release_info(soup)  # Новый парсер, возвращает дополнительные поля
+    release_info = parse_release_info(soup)
 
     try:
         game_id = extract_id_from_url(url)
@@ -328,8 +328,9 @@ def parse_hltb_game(url: str) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
     return ({
         "id": str(game_id),
         "name": name,
+        "type": content_type,
         "release_date": release_date,
-        **release_info,  # включает release_precision, release_year, release_month, release_day
+        **release_info,
         **times
     }, None)
 
@@ -499,15 +500,14 @@ if __name__ == "__main__":
         for i in range(start_id, end_id):
             url = f"https://howlongtobeat.com/game/{i}"
             try:
-                data, skip_reason = parse_hltb_game(url)
-
-                if skip_reason:
-                    f_log.write(f"[SKIP-NOTE] ID {i} — {skip_reason}\n")
-                    continue
-
+                data, _ = parse_hltb_game(url)
                 if data is None:
                     f_log.write(f"[SKIP] ID {i} — нет данных или 404\n")
                     continue
+
+                # опционально помечаем в логе
+                if data.get("type") != "game":
+                    f_log.write(f"[FLAG] ID {i} — {data.get('name')} — {data.get('type')}\n")
 
                 writer.writerow(data)
                 log_msg = f"[OK]   ID {i} — {data.get('name')}\n"
