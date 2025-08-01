@@ -3,6 +3,7 @@
 
 import argparse
 import asyncio
+import contextlib
 import csv
 import datetime as dt
 import json
@@ -14,11 +15,11 @@ import traceback
 from typing import Any, Dict, Optional, Tuple, List
 
 import aiohttp
-from aiohttp import ClientSession, ClientResponse
+from aiohttp import ClientSession
 from bs4 import BeautifulSoup
 
 DEFAULT_CSV_PATH = "hltb_dataset.csv"
-DEFAULT_LOG_PATH = "hltb_errors.log"
+DEFAULT_LOG_PATH = "hltb.log"
 
 CSV_HEADERS = [
     "id", "name", "type",
@@ -50,6 +51,14 @@ TIME_KEYS = [
     "single_player", "co_op", "versus"
 ]
 POLLED_KEYS = [f"{k}_polled" for k in TIME_KEYS]
+
+
+# ----------------------------- Логирование в консоль и файл -----------------------------
+
+def log(msg: str, file) -> None:
+    print(msg)
+    file.write(msg + "\n")
+    file.flush()
 
 
 # ----------------------------- Утилиты нормализации -----------------------------
@@ -85,8 +94,7 @@ def parse_hours(text: str) -> Optional[float]:
     if "-" in raw or "–" in raw or "—" in raw:
         parts = re.split(r"\s*[-–—]\s*", raw)
         if len(parts) == 2:
-            a = parse_hours(parts[0])
-            b = parse_hours(parts[1])
+            a = parse_hours(parts[0]); b = parse_hours(parts[1])
             if a is not None and b is not None:
                 avg = round((a + b) / 2.0, 2)
                 return int(avg) if float(avg).is_integer() else avg
@@ -268,7 +276,6 @@ def parse_release_info(soup: BeautifulSoup) -> Dict[str, Optional[str]]:
         if txt:
             texts.append(txt)
 
-    # Ищем от более точного к менее точному
     for text in texts:
         m = re.search(r"[A-Z]{2,3}:\s*([A-Za-z]+)\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})", text, re.I)
         if m:
@@ -320,7 +327,6 @@ def parse_release_info(soup: BeautifulSoup) -> Dict[str, Optional[str]]:
 
 
 def parse_release_date_legacy(soup: BeautifulSoup) -> Optional[str]:
-    # Старый способ: только YYYY-MM-DD
     for div in soup.find_all("div", class_=re.compile(r"GameSummary_profile_info__.*")):
         text = " ".join(div.stripped_strings)
         m = re.search(r"([A-Z]{2,3}):\s*([A-Za-z]+)\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})", text, re.I)
@@ -421,62 +427,82 @@ class Fetcher:
         return None
 
     async def _warn(self, url: str, msg: str):
-        self.log.write(f"[WARN] {url} — {msg}\n")
+        log(f"[WARN] {url} — {msg}", self.log)
 
 
 # ----------------------------- Пайплайн: producer/consumer -----------------------------
 
-async def producer(fetcher: Fetcher, id_range: range, out_q: "asyncio.Queue[Tuple[int, Optional[Dict[str, Any]], Optional[str]]]"):
-    for game_id in id_range:
-        url = f"https://howlongtobeat.com/game/{game_id}"
+async def producer(fetcher: "Fetcher",
+                   start_id: int,
+                   out_q: "asyncio.Queue[Tuple[int, Optional[Dict[str, Any]], Optional[str]]]",
+                   stop_event: asyncio.Event,
+                   end_id: Optional[int] = None):
+    i = start_id
+    while not stop_event.is_set():
+        if end_id is not None and i >= end_id:
+            break
+        url = f"https://howlongtobeat.com/game/{i}"
         html = await fetcher.fetch_html(url)
         if html is None:
-            await out_q.put((game_id, None, None))
+            await out_q.put((i, None, None))
             await fetcher.polite_sleep()
+            i += 1
             continue
         try:
             data = parse_hltb_game_from_html(url, html)
         except Exception as e:
-            data = None
             err = f"{repr(e)}\n{traceback.format_exc()}"
-            await out_q.put((game_id, data, err))
+            await out_q.put((i, None, err))
             await fetcher.polite_sleep()
+            i += 1
             continue
 
-        await out_q.put((game_id, data, None))
+        await out_q.put((i, data, None))
         await fetcher.polite_sleep()
+        i += 1
 
 
 async def consumer(out_q: "asyncio.Queue[Tuple[int, Optional[Dict[str, Any]], Optional[str]]]",
                    writer: csv.DictWriter,
                    log_file,
-                   existing_ids: set):
+                   existing_ids: set,
+                   stop_event: asyncio.Event,
+                   miss_threshold: int):
     processed = 0
+    consecutive_skips = 0
     while True:
         item = await out_q.get()
-        if item is None:  # терминатор
+        if item is None:
             out_q.task_done()
             break
+
         game_id, data, err = item
 
         if err:
-            log_file.write(f"[ERROR] ID {game_id} — {err}\n")
+            log(f"[ERROR] ID {game_id} — {err}", log_file)
             out_q.task_done()
             continue
 
         if data is None:
-            log_file.write(f"[SKIP]  ID {game_id} — нет данных или 404\n")
+            consecutive_skips += 1
+            log(f"[SKIP]  ID {game_id} — нет данных или 404 (streak={consecutive_skips}/{miss_threshold})", log_file)
+            if consecutive_skips >= miss_threshold and not stop_event.is_set():
+                log(f"[STOP]  Достигнут порог подряд: {miss_threshold} пропусков. Останов.", log_file)
+                stop_event.set()
             out_q.task_done()
             continue
 
+        consecutive_skips = 0
+
         if data["id"] in existing_ids:
-            log_file.write(f"[DUP]   ID {game_id} — пропущен (уже есть в CSV)\n")
+            log(f"[DUP]   ID {game_id} — пропущен (уже есть в CSV)", log_file)
             out_q.task_done()
             continue
 
         writer.writerow(data)
         existing_ids.add(data["id"])
-        log_file.write(f"[OK]    ID {game_id} — {data.get('name')}\n")
+        log(f"[OK]    ID {game_id} — {data.get('name')}", log_file)
+
         processed += 1
         if processed % 100 == 0:
             log_file.flush()
@@ -527,8 +553,8 @@ async def main_async(args):
     else:
         start_id = get_resume_start(csv_path)
 
-    end_id = start_id + max(0, args.count)
-    id_range = range(start_id, end_id)
+    infinite = isinstance(args.count, str) and args.count.strip() == "*"
+    end_id = None if infinite else start_id + max(0, int(args.count))
 
     connector = aiohttp.TCPConnector(limit=concurrency * 4, ttl_dns_cache=300)
     headers = {
@@ -539,6 +565,8 @@ async def main_async(args):
     }
 
     out_q: asyncio.Queue = asyncio.Queue(maxsize=concurrency * 8)
+    stop_event = asyncio.Event()
+    miss_threshold = int(args.miss_threshold)
 
     with open(csv_path, "a", newline="", encoding="utf-8-sig") as f_csv, \
          open(log_path, "a", encoding="utf-8") as f_log:
@@ -552,31 +580,41 @@ async def main_async(args):
         if not file_exists:
             writer.writeheader()
 
-        f_log.write(f"[RESUME] start_id={start_id} count={args.count} end_id={end_id-1} concurrency={concurrency}\n")
+        mode = "*" if infinite else f"{int(args.count)}"
+        log(f"[RESUME] start_id={start_id} mode={mode} concurrency={concurrency} miss_threshold={miss_threshold}", f_log)
 
         async with aiohttp.ClientSession(headers=headers, connector=connector) as session:
             fetcher = Fetcher(session=session, log_file=f_log, concurrency=concurrency)
 
-            prod_task = asyncio.create_task(producer(fetcher, id_range, out_q))
-            cons_task = asyncio.create_task(consumer(out_q, writer, f_log, existing_ids))
+            prod_task = asyncio.create_task(producer(fetcher, start_id, out_q, stop_event, end_id=end_id))
+            cons_task = asyncio.create_task(consumer(out_q, writer, f_log, existing_ids, stop_event, miss_threshold))
 
             try:
                 await prod_task
-                await out_q.put(None)  # терминатор для consumer
+                await out_q.put(None)
                 await cons_task
             except KeyboardInterrupt:
-                f_log.write("[ABORT] Получен KeyboardInterrupt, корректное завершение...\n")
+                log("[ABORT] Получен KeyboardInterrupt, корректное завершение…", f_log)
+                stop_event.set()
+                await out_q.put(None)
             finally:
+                if not prod_task.done():
+                    prod_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await prod_task
                 f_log.flush()
 
 
 def main():
     parser = argparse.ArgumentParser(prog="hltb-parser-async", description="HowLongToBeat parser (async)")
-    parser.add_argument("count", nargs="?", type=int, default=1000, help="сколько ID обработать подряд, по умолчанию 1000")
+    parser.add_argument("count", nargs="?", default="1000",
+                        help='сколько ID обработать подряд. Число или "*" для режима без верхней границы с автостопом')
     parser.add_argument("--start", type=int, default=None, help="стартовый ID; если не задан, берётся из CSV")
     parser.add_argument("--concurrency", type=int, default=8, help="число одновременных запросов; дефолт 8")
     parser.add_argument("--csv", type=str, default=DEFAULT_CSV_PATH, help=f"путь к CSV; дефолт {DEFAULT_CSV_PATH}")
     parser.add_argument("--log", type=str, default=DEFAULT_LOG_PATH, help=f"путь к логу; дефолт {DEFAULT_LOG_PATH}")
+    parser.add_argument("--miss-threshold", type=int, default=400,
+                        help="порог подряд для 'нет данных/404' в режиме '*'; дефолт 400")
     args = parser.parse_args()
 
     try:
