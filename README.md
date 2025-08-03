@@ -3,6 +3,8 @@
 Asynchronous, fault-tolerant web scraper for [howlongtobeat.com](https://howlongtobeat.com) collecting game statistics: completion times, multiplayer modes, release dates.  
 Designed as a robust async pipeline with deduplication, retries, label normalization, and clean CSV output. Suitable for long-running data collection and subsequent analysis.
 
+### [Kaggle link](https://www.kaggle.com/datasets/b4n4n4p0wer/how-long-to-beat-video-game-playtime-dataset)
+
 ![HLTB Screenshot](Screenshot.png)  
 <sub>Source: howlongtobeat.com</sub>
 
