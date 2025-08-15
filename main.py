@@ -330,6 +330,38 @@ def parse_meta_fields(soup: BeautifulSoup) -> Dict[str, Optional[str]]:
     return out
 
 
+def normalize_meta(meta: Dict[str, Optional[str]]) -> Dict[str, Optional[str]]:
+    if meta.get("platform"):
+        parts = re.split(r"[,\n]+", meta["platform"])
+        parts = [p.strip() for p in parts if p.strip()]
+        parts = list(dict.fromkeys(parts))  # дедуп
+        meta["platform"] = ", ".join(parts)
+
+    if meta.get("genres"):
+        # маппинг к единому словарю жанров по вкусу; пример — выравнивание кейсов и синонимов
+        synonyms = {
+            "role-playing": "Role-Playing",
+            "rpg": "Role-Playing",
+            "shoot em' up": "Shoot 'Em Up",
+            "vertical scrolling shooter": "Vertical Scrolling Shooter",
+            "racing/driving": "Racing, Driving",
+        }
+        parts = [g.strip() for g in meta["genres"].split(",") if g.strip()]
+        normed = []
+        for g in parts:
+            key = g.lower()
+            g2 = synonyms.get(key, g.title())
+            normed.append(g2)
+        normed = list(dict.fromkeys(normed))
+        meta["genres"] = ", ".join(normed)
+
+    for k in ("developer", "publisher"):
+        if meta.get(k):
+            meta[k] = re.sub(r"\s+", " ", meta[k]).strip() or None
+
+    return meta
+
+
 def parse_release_info(soup: BeautifulSoup) -> Dict[str, Optional[str]]:
     texts = []
     for div in soup.find_all("div", class_=re.compile(r"GameSummary_profile_info__.*")):
@@ -421,7 +453,8 @@ def parse_hltb_game_from_html(url: str, html: str) -> Optional[Dict[str, Any]]:
         return None
 
     content_type = detect_content_type(soup)
-    meta = parse_meta_fields(soup)
+    meta = parse_meta_fields(soup)  # распарсили, что есть на странице
+    meta = normalize_meta(meta)  # привели к единому формату
 
     times = parse_times_from_tables(soup)
     if all(times.get(k) is None for k in TIME_KEYS):
@@ -604,12 +637,112 @@ def get_resume_start(csv_path: str) -> int:
     return last_id + 1
 
 
+async def producer_worker(worker_idx: int,
+                          stride: int,
+                          fetcher: "Fetcher",
+                          start_id: int,
+                          out_q: "asyncio.Queue[Tuple[int, Optional[Dict[str, Any]], Optional[str]]]",
+                          stop_event: asyncio.Event,
+                          end_id: Optional[int] = None):
+    i = start_id + worker_idx
+    while not stop_event.is_set():
+        if end_id is not None and i >= end_id:
+            break
+        url = f"https://howlongtobeat.com/game/{i}"
+        html = await fetcher.fetch_html(url)
+        if html is None:
+            await out_q.put((i, None, None))
+            await fetcher.polite_sleep()
+            i += stride
+            continue
+        try:
+            data = parse_hltb_game_from_html(url, html)
+        except Exception as e:
+            err = f"{repr(e)}\n{traceback.format_exc()}"
+            await out_q.put((i, None, err))
+            await fetcher.polite_sleep()
+            i += stride
+            continue
+
+        await out_q.put((i, data, None))
+        await fetcher.polite_sleep()
+        i += stride
+
+
+async def consumer(out_q: "asyncio.Queue[Tuple[int, Optional[Dict[str, Any]], Optional[str]]]",
+                   writer: csv.DictWriter,
+                   log_file,
+                   existing_ids: set,
+                   stop_event: asyncio.Event,
+                   miss_threshold: int,
+                   *,
+                   expected_start: int,
+                   end_id: Optional[int]):
+    buffer: Dict[int, Tuple[Optional[Dict[str, Any]], Optional[str]]] = {}
+    expected = expected_start
+    processed = 0
+    consecutive_skips = 0
+    producers_done = False
+
+    while True:
+        item = await out_q.get()
+        if item is None:
+            producers_done = True
+            out_q.task_done()
+        else:
+            game_id, data, err = item
+            if err:
+                log(f"[ERROR] ID {game_id} — {err}", log_file)
+                buffer[game_id] = (None, None)  # помечаем как пропуск, чтобы не блокировать порядок
+            else:
+                buffer[game_id] = (data, None)
+            out_q.task_done()
+
+        # Пишем непрерывный префикс начиная с expected
+        while True:
+            entry = buffer.pop(expected, None)
+            if entry is None:
+                break
+
+            data, _ = entry
+            if data is None:
+                consecutive_skips += 1
+                log(f"[SKIP]  ID {expected} — нет данных или 404 (streak={consecutive_skips}/{miss_threshold})", log_file)
+                if consecutive_skips >= miss_threshold and not stop_event.is_set():
+                    log(f"[STOP]  Достигнут порог подряд: {miss_threshold} пропусков. Останов.", log_file)
+                    stop_event.set()
+            else:
+                consecutive_skips = 0
+                if data["id"] in existing_ids:
+                    log(f"[DUP]   ID {expected} — пропущен (уже есть в CSV)", log_file)
+                else:
+                    writer.writerow(data)
+                    existing_ids.add(data["id"])
+                    processed += 1
+                    if processed % 100 == 0:
+                        log_file.flush()
+                    log(f"[OK]    ID {expected} — {data.get('name')}", log_file)
+
+            expected += 1
+            if end_id is not None and expected >= end_id:
+                buffer.clear()
+                break
+
+        if producers_done and not buffer:
+            break
+
+
 # ----------------------------- Точка входа -----------------------------
+
 
 async def main_async(args):
     csv_path = args.csv
     log_path = args.log
     concurrency = max(1, args.concurrency)
+    workers = max(1, getattr(args, "workers", None) or concurrency)
+
+    # если хочешь жёстко ограничить воркеров семафором Fetcher:
+    workers = min(workers, concurrency)
 
     file_exists = os.path.exists(csv_path)
     existing_ids = read_existing_ids(csv_path)
@@ -622,7 +755,11 @@ async def main_async(args):
     infinite = isinstance(args.count, str) and args.count.strip() == "*"
     end_id = None if infinite else start_id + max(0, int(args.count))
 
-    connector = aiohttp.TCPConnector(limit=concurrency * 4, ttl_dns_cache=300)
+    connector = aiohttp.TCPConnector(
+        limit=concurrency * 4,
+        limit_per_host=concurrency,
+        ttl_dns_cache=300
+    )
     headers = {
         "User-Agent": USER_AGENT,
         "Accept-Language": "en-US,en;q=0.9",
@@ -647,16 +784,31 @@ async def main_async(args):
             writer.writeheader()
 
         mode = "*" if infinite else f"{int(args.count)}"
-        log(f"[RESUME] start_id={start_id} mode={mode} concurrency={concurrency} miss_threshold={miss_threshold}", f_log)
+        log(f"[RESUME] start_id={start_id} mode={mode} concurrency={concurrency} workers={workers} miss_threshold={miss_threshold}", f_log)
 
         async with aiohttp.ClientSession(headers=headers, connector=connector) as session:
             fetcher = Fetcher(session=session, log_file=f_log, concurrency=concurrency)
 
-            prod_task = asyncio.create_task(producer(fetcher, start_id, out_q, stop_event, end_id=end_id))
-            cons_task = asyncio.create_task(consumer(out_q, writer, f_log, existing_ids, stop_event, miss_threshold))
+            # пул продьюсеров с шагом по ID = workers
+            prod_tasks = [
+                asyncio.create_task(
+                    producer_worker(idx, workers, fetcher, start_id, out_q, stop_event, end_id=end_id)
+                )
+                for idx in range(workers)
+            ]
+
+            # упорядоченный консюмер
+            cons_task = asyncio.create_task(
+                consumer(
+                    out_q, writer, f_log, existing_ids, stop_event, miss_threshold,
+                    expected_start=start_id, end_id=end_id
+                )
+            )
 
             try:
-                await prod_task
+                # ждём всех продьюсеров
+                await asyncio.gather(*prod_tasks)
+                # один финальный маркер завершения для консюмера
                 await out_q.put(None)
                 await cons_task
             except KeyboardInterrupt:
@@ -664,10 +816,11 @@ async def main_async(args):
                 stop_event.set()
                 await out_q.put(None)
             finally:
-                if not prod_task.done():
-                    prod_task.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await prod_task
+                for t in prod_tasks:
+                    if not t.done():
+                        t.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await t
                 f_log.flush()
 
 
@@ -677,6 +830,8 @@ def main():
                         help='сколько ID обработать подряд. Число или "*" для режима без верхней границы с автостопом')
     parser.add_argument("--start", type=int, default=None, help="стартовый ID; если не задан, берётся из CSV")
     parser.add_argument("--concurrency", type=int, default=8, help="число одновременных запросов; дефолт 8")
+    parser.add_argument("--workers", type=int, default=None,
+                        help="число параллельных воркеров по ID; по умолчанию = concurrency")
     parser.add_argument("--csv", type=str, default=DEFAULT_CSV_PATH, help=f"путь к CSV; дефолт {DEFAULT_CSV_PATH}")
     parser.add_argument("--log", type=str, default=DEFAULT_LOG_PATH, help=f"путь к логу; дефолт {DEFAULT_LOG_PATH}")
     parser.add_argument("--miss-threshold", type=int, default=400,
