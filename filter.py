@@ -18,81 +18,89 @@ METRICS_COLS: List[str] = [
     "versus_polled", "versus",
 ]
 
-# Служебные столбцы, которые нужно удалить
+# Служебные столбцы, которые нужно удалить при фильтрации
 SERVICE_COLS: List[str] = ["source_url", "crawled_at"]
 
+# Вспомогательные списки для приведения типов
+TIME_COLS = [
+    "main_story", "main_plus_sides", "completionist",
+    "all_styles", "single_player", "co_op", "versus",
+]
+POLLED_COLS = [f"{c}_polled" for c in TIME_COLS]
+YMD_COLS = ["release_year", "release_month", "release_day"]
 
-# Нормализация значения столбца type
-def normalize_type(x: object) -> str:
-    s = "" if pd.isna(x) else str(x).strip().lower()
-    s = s.replace("-", " ")
-    s = " ".join(s.split())
-    if s in {"dlc/expansion", "dlc expansion", "dlc", "expansion"}:
-        return "dlc/expansion"
-    if s in {"multiplayer focused", "multiplayer"}:
-        return "multiplayer focused"
-    if s in {"game", "base game", "standalone"}:
-        return "game"
-    return s
+# Словари нормализации (пример)
+PLATFORM_MAP = {
+    "PC": "PC",
+    "PC (Windows)": "PC",
+    "Playstation 4": "PlayStation 4",
+    "PS4": "PlayStation 4",
+    "Xbox One": "Xbox One",
+    # ...
+}
+GENRE_MAP = {
+    "RTS": "Real Time Strategy",
+    "Strategy": "Strategy",
+    "Tactics": "Tactics",
+    "Action-Adventure": "Action Adventure",
+    "RPG": "Role Playing Game",
+    # ...
+}
 
 
-# Фильтрация строк с полностью пустыми метриками
-def filter_dataset(df: pd.DataFrame) -> tuple[pd.DataFrame, int, int, List[str]]:
-    # Проверяем наличие всех ожидаемых столбцов
+def normalize_list_field(val: object, mapping: dict) -> str:
+    """Нормализует поле со списком значений через запятую."""
+    if pd.isna(val):
+        return ""
+    parts = [p.strip() for p in str(val).split(",") if p.strip()]
+    norm_parts = []
+    for p in parts:
+        norm_parts.append(mapping.get(p, p))
+    return ", ".join(sorted(set(norm_parts)))
+
+
+def normalize_platforms_series(series: pd.Series) -> pd.Series:
+    return series.apply(lambda v: normalize_list_field(v, PLATFORM_MAP))
+
+
+def normalize_genres_series(series: pd.Series) -> pd.Series:
+    return series.apply(lambda v: normalize_list_field(v, GENRE_MAP))
+
+
+def coerce_dtypes_inplace(df: pd.DataFrame) -> None:
+    """Приводим типы, чтобы не было 2015.0 и 90.0."""
+    if "id" in df.columns:
+        df["id"] = pd.to_numeric(df["id"], errors="coerce").astype("Int64")
+    for c in YMD_COLS:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce").astype("Int64")
+    for c in POLLED_COLS:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce").astype("Int64")
+    for c in TIME_COLS:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+
+
+def filter_dataframe(df: pd.DataFrame) -> tuple[pd.DataFrame, int, int, List[str]]:
+    """Удаляет строки, где все метрики пустые, и убирает служебные столбцы."""
     missing = [c for c in METRICS_COLS if c not in df.columns]
     if missing:
-        raise ValueError(f"Отсутствуют ожидаемые столбцы: {missing}")
-
+        raise ValueError(f"Отсутствуют столбцы: {missing}")
     before = len(df)
-
-    # Готовим подвыборку для поиска пустых строк
     sub = df[METRICS_COLS].copy()
     for c in METRICS_COLS:
         s = sub[c]
         if pd.api.types.is_string_dtype(s) or s.dtype == object:
             sub[c] = s.astype("string").str.strip().replace("", pd.NA)
-
-    # Маска строк, где все метрики пустые
     mask_all_empty = sub.isna().all(axis=1)
-
-    # Исключаем полностью пустые строки
     df = df.loc[~mask_all_empty].copy()
     after = len(df)
-
-    # Удаляем служебные столбцы, если они есть
     present_to_drop = [c for c in SERVICE_COLS if c in df.columns]
     df.drop(columns=SERVICE_COLS, errors="ignore", inplace=True)
-
     return df, before, after, present_to_drop
 
 
-# Разбиение датасета на три выгрузки по типу
-def split_exports(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, int]:
-    # Проверка наличия обязательного столбца
-    if "type" not in df.columns:
-        raise ValueError("Отсутствует обязательный столбец 'type' для разбиения по типам.")
-
-    # Создаём нормализованный столбец
-    df["_type_norm"] = df["type"].map(normalize_type)
-
-    # Формируем подвыборки
-    df_game = df.loc[df["_type_norm"] == "game"].copy()
-    df_dlc = df.loc[df["_type_norm"] == "dlc/expansion"].copy()
-    df_multi = df.loc[df["_type_norm"] == "multiplayer focused"].copy()
-
-    # Подсчёт прочих строк
-    n_other = len(df) - (len(df_game) + len(df_dlc) + len(df_multi))
-
-    # Удаляем служебные поля и столбец нормализации
-    for sub in (df_game, df_dlc, df_multi):
-        sub.drop(columns=SERVICE_COLS, errors="ignore", inplace=True)
-        if "_type_norm" in sub.columns:
-            sub.drop(columns=["_type_norm"], inplace=True)
-
-    return df_game, df_dlc, df_multi, n_other
-
-
-# Запись DataFrame в CSV с кавычками и пустыми значениями
 def write_csv(df: pd.DataFrame, path: Path) -> None:
     df.to_csv(
         path,
@@ -100,59 +108,55 @@ def write_csv(df: pd.DataFrame, path: Path) -> None:
         quoting=csv.QUOTE_ALL,
         lineterminator="\n",
         encoding="utf-8",
-        na_rep=""  # Пропуски выводим как пустые строки
+        na_rep=""
     )
 
 
 def main() -> None:
-    # CLI аргументы
-    p = argparse.ArgumentParser(description="Фильтрация и разбиение HLTB датасета.")
-    p.add_argument("--src", default="hltb_dataset.csv", help="Путь к сырому CSV с заголовком.")
-    p.add_argument("--out-dir", default=".", help="Каталог для сохранения результатов.")
-    p.add_argument("--filtered-name", dest="filtered_name", default="hltb_dataset_filtered.csv", help="Имя файла после фильтрации.")
-    p.add_argument("--out-game", default="hltb_game.csv", help="Имя выгрузки для type=game.")
-    p.add_argument("--out-dlc", default="hltb_dlc_expansion.csv", help="Имя выгрузки для type=dlc/expansion.")
-    p.add_argument("--out-multi", default="hltb_multiplayer_focused.csv", help="Имя выгрузки для type=multiplayer focused.")
+    p = argparse.ArgumentParser(description="Нормализация и фильтрация HLTB датасета.")
+    p.add_argument("--src", default="hltb_dataset.csv", help="Путь к исходному CSV.")
+    p.add_argument("--out-dir", default=".", help="Папка для результатов.")
+    p.add_argument("--chunksize", type=int, default=50000, help="Размер чанка для потоковой обработки.")
     args = p.parse_args()
 
-    # Подготовка путей
     src = Path(args.src)
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    dst_filtered = out_dir / args.filtered_name
-    out_game = out_dir / args.out_game
-    out_dlc = out_dir / args.out_dlc
-    out_multi = out_dir / args.out_multi
+    p_norm = out_dir / "hltb_dataset_normalized.csv"
+    p_filt = out_dir / "hltb_dataset_filtered.csv"
 
-    # Шаг 1: Чтение исходного файла
-    df_raw = pd.read_csv(src, low_memory=False)
+    # Шаг 1: потоковая нормализация
+    wrote_header = False
+    total_rows = 0
+    for chunk in pd.read_csv(src, low_memory=False, chunksize=args.chunksize):
+        if "platform" in chunk.columns:
+            chunk["platform"] = normalize_platforms_series(chunk["platform"])
+        if "genres" in chunk.columns:
+            chunk["genres"] = normalize_genres_series(chunk["genres"])
+        coerce_dtypes_inplace(chunk)
+        chunk.to_csv(
+            p_norm,
+            index=False,
+            quoting=csv.QUOTE_ALL,
+            lineterminator="\n",
+            encoding="utf-8",
+            na_rep="",
+            mode="a",
+            header=not wrote_header
+        )
+        wrote_header = True
+        total_rows += len(chunk)
 
-    # Шаг 2: Фильтрация датасета
-    df_filtered, before, after, dropped_cols = filter_dataset(df_raw)
-    write_csv(df_filtered, dst_filtered)
+    print(f"[OK] Нормализовано {total_rows} строк → {p_norm.name}")
 
-    # Шаг 3: Разбиение по типам
-    df_game, df_dlc, df_multi, n_other = split_exports(df_filtered)
-
-    # Шаг 4: Запись результатов
-    write_csv(df_game, out_game)
-    write_csv(df_dlc, out_dlc)
-    write_csv(df_multi, out_multi)
-
-    # Итоговый вывод
-    print(
-        f"Done. Removed rows with no time-to-beat values: {before - after}. Remaining rows: {after}.\n"
-        f"Removed columns: {dropped_cols}. Output file: {dst_filtered.name}\n"
-        f"Within the filtered set of {after} entries: Game: {len(df_game)}. DLC/Expansion: {len(df_dlc)}. Multiplayer focused: {len(df_multi)}. Other/Unrecognized: {n_other}.\n"
-    )
-    print(
-        f"Files:\n"
-        f"• {dst_filtered.name}; \n"
-        f"• {out_game.name}; \n"
-        f"• {out_dlc.name}; \n"
-        f"• {out_multi.name}."
-    )
+    # Шаг 2: фильтрация нормализованного файла
+    df_norm = pd.read_csv(p_norm, low_memory=False)
+    coerce_dtypes_inplace(df_norm)
+    df_filt, before, after, dropped_cols = filter_dataframe(df_norm)
+    write_csv(df_filt, p_filt)
+    print(f"[OK] Фильтрация: удалено {before - after} строк. Осталось {after}.")
+    print(f"[OK] Результат → {p_filt.name}")
 
 
 if __name__ == "__main__":
