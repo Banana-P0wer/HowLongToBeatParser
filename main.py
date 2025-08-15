@@ -16,13 +16,14 @@ from typing import Any, Dict, Optional, Tuple, List
 
 import aiohttp
 from aiohttp import ClientSession
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, NavigableString
 
 DEFAULT_CSV_PATH = "hltb_dataset.csv"
 DEFAULT_LOG_PATH = "hltb.log"
 
 CSV_HEADERS = [
     "id", "name", "type",
+    "platform", "genres", "developer", "publisher",
     "release_date", "release_precision", "release_year", "release_month", "release_day",
     "main_story_polled", "main_story",
     "main_plus_sides_polled", "main_plus_sides",
@@ -269,6 +270,66 @@ def detect_content_type(soup: BeautifulSoup) -> str:
     return "game" if not flags else "; ".join(sorted(set(flags)))
 
 
+def parse_meta_fields(soup: BeautifulSoup) -> Dict[str, Optional[str]]:
+    out = {
+        "platform": None,
+        "genres": None,
+        "developer": None,
+        "publisher": None,
+    }
+
+    info_divs = soup.find_all("div", class_=re.compile(r"GameSummary_profile_info__"))
+    if not info_divs:
+        return out
+
+    # Нормализуем лейблы: оставляем только латинские буквы, без пробелов и двоеточий.
+    key_map = {
+        "platform": "platform",
+        "platforms": "platform",
+        "genre": "genres",
+        "genres": "genres",
+        "developer": "developer",
+        "publisher": "publisher",
+    }
+
+    for div in info_divs:
+        strong = div.find("strong")
+        if not strong:
+            continue
+
+        raw_label = strong.get_text(" ", strip=True)
+        norm_label = re.sub(r"[^a-z]+", "", raw_label.lower())  # "Genres:" -> "genres", "Genre s" -> "genres"
+        key = key_map.get(norm_label)
+        if not key:
+            continue
+
+        # Собираем ТОЛЬКО содержимое после <strong>…</strong>, игнорируя <br> и двоеточие.
+        chunks: List[str] = []
+        for sib in strong.next_siblings:
+            if isinstance(sib, NavigableString):
+                txt = str(sib).strip()
+                if not txt:
+                    continue
+                if txt.startswith(":"):
+                    txt = txt.lstrip(":").strip()
+                if txt:
+                    chunks.append(txt)
+            else:
+                if getattr(sib, "name", None) == "br":
+                    continue
+                txt = sib.get_text(" ", strip=True)
+                if txt:
+                    chunks.append(txt)
+
+        value = re.sub(r"\s+", " ", " ".join(chunks)).strip()
+        if value in {"", "-", "--"}:
+            value = None
+
+        out[key] = value
+
+    return out
+
+
 def parse_release_info(soup: BeautifulSoup) -> Dict[str, Optional[str]]:
     texts = []
     for div in soup.find_all("div", class_=re.compile(r"GameSummary_profile_info__.*")):
@@ -360,6 +421,7 @@ def parse_hltb_game_from_html(url: str, html: str) -> Optional[Dict[str, Any]]:
         return None
 
     content_type = detect_content_type(soup)
+    meta = parse_meta_fields(soup)
 
     times = parse_times_from_tables(soup)
     if all(times.get(k) is None for k in TIME_KEYS):
@@ -377,6 +439,10 @@ def parse_hltb_game_from_html(url: str, html: str) -> Optional[Dict[str, Any]]:
         "id": str(game_id),
         "name": name,
         "type": content_type,
+        "platform": meta["platform"],
+        "genres": meta["genres"],
+        "developer": meta["developer"],
+        "publisher": meta["publisher"],
         **ri,
         **times,
         "source_url": url,
