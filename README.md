@@ -5,7 +5,7 @@ Designed as a robust async pipeline with deduplication, retries, label normaliza
 
 ### [Kaggle link](https://www.kaggle.com/datasets/b4n4n4p0wer/how-long-to-beat-video-game-playtime-dataset)
 
-![HLTB Screenshot](Screenshot.png)  
+[![Screenshot.png](https://i.postimg.cc/7L2DWGR8/Screenshot.png)](https://postimg.cc/Lq2rqXRN)
 <sub>Source: howlongtobeat.com</sub>
 
 ## What this project does
