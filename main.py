@@ -44,7 +44,10 @@ USER_AGENT = (
 MONTHS = {
     "january": 1, "february": 2, "march": 3, "april": 4,
     "may": 5, "june": 6, "july": 7, "august": 8,
-    "september": 9, "october": 10, "november": 11, "december": 12
+    "september": 9, "october": 10, "november": 11, "december": 12,
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4,
+    "jun": 6, "jul": 7, "aug": 8, "sep": 9,
+    "sept": 9, "oct": 10, "nov": 11, "dec": 12
 }
 
 TIME_KEYS = [
@@ -52,9 +55,10 @@ TIME_KEYS = [
     "single_player", "co_op", "versus"
 ]
 POLLED_KEYS = [f"{k}_polled" for k in TIME_KEYS]
+QueueItem = Tuple[int, Optional[Dict[str, Any]], Optional[str], Optional[str]]
 
 
-# ----------------------------- Логирование в консоль и файл -----------------------------
+# Логирование в консоль и файл  
 
 def log(msg: str, file) -> None:
     print(msg)
@@ -62,7 +66,7 @@ def log(msg: str, file) -> None:
     file.flush()
 
 
-# ----------------------------- Утилиты нормализации -----------------------------
+# Утилиты нормализации  
 
 def norm_time_label(label: str) -> Optional[str]:
     lbl = label.strip().lower()
@@ -153,7 +157,192 @@ def ensure_time_keys(d: Dict[str, Any]) -> Dict[str, Any]:
     return d
 
 
-# ----------------------------- Парсинг HTML -----------------------------
+def clean_text(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    text = re.sub(r"\s+", " ", str(value)).strip()
+    return text or None
+
+
+def first_non_empty_value(data: Dict[str, Any], keys: List[str]) -> Any:
+    for key in keys:
+        if key not in data:
+            continue
+        value = data.get(key)
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        return value
+    return None
+
+
+def normalize_listish(value: Any) -> Optional[str]:
+    parts: List[str] = []
+    if value is None:
+        return None
+    if isinstance(value, list):
+        for item in value:
+            txt = clean_text(item)
+            if txt:
+                parts.append(txt)
+    elif isinstance(value, str):
+        parts = [p.strip() for p in re.split(r"[,;\n]+", value) if p.strip()]
+    else:
+        txt = clean_text(value)
+        if txt:
+            parts.append(txt)
+
+    if not parts:
+        return None
+
+    uniq = list(dict.fromkeys(parts))
+    return ", ".join(uniq) if uniq else None
+
+
+def to_int_any(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        return to_int(value)
+    return None
+
+
+def format_hours(value: float) -> float:
+    rounded = round(value, 2)
+    return int(rounded) if float(rounded).is_integer() else rounded
+
+
+def parse_duration_seconds(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        number = float(value)
+        if number <= 0:
+            return None
+        # В next-data HLTB длительности приходят в секундах.
+        return format_hours(number / 3600.0)
+
+    text = clean_text(value)
+    if not text or text in {"0", "--", "-"}:
+        return None
+
+    if re.fullmatch(r"-?\d+(?:\.\d+)?", text):
+        number = float(text)
+        if number <= 0:
+            return None
+        return format_hours(number / 3600.0)
+
+    return parse_hours(text)
+
+
+def month_to_int(name: str) -> Optional[int]:
+    key = name.strip().lower().strip(".")
+    return MONTHS.get(key)
+
+
+def parse_release_info_from_text(text: str) -> Dict[str, Optional[str]]:
+    clean = clean_text(text)
+    if not clean:
+        return {
+            "release_date": None,
+            "release_precision": None,
+            "release_year": None,
+            "release_month": None,
+            "release_day": None,
+        }
+
+    clean = re.sub(r"^[A-Z]{2,3}\s*:\s*", "", clean)
+
+    m = re.match(r"^(\d{4})-(\d{2})-(\d{2})$", clean)
+    if m:
+        year, month, day = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        return {
+            "release_date": f"{year:04d}-{month:02d}-{day:02d}",
+            "release_precision": "day",
+            "release_year": f"{year:04d}",
+            "release_month": f"{month:02d}",
+            "release_day": f"{day:02d}",
+        }
+
+    m = re.match(r"^(\d{4})-(\d{2})$", clean)
+    if m:
+        year, month = int(m.group(1)), int(m.group(2))
+        return {
+            "release_date": f"{year:04d}-{month:02d}",
+            "release_precision": "month",
+            "release_year": f"{year:04d}",
+            "release_month": f"{month:02d}",
+            "release_day": None,
+        }
+
+    m = re.match(r"^(\d{4})$", clean)
+    if m:
+        year = int(m.group(1))
+        return {
+            "release_date": f"{year:04d}",
+            "release_precision": "year",
+            "release_year": f"{year:04d}",
+            "release_month": None,
+            "release_day": None,
+        }
+
+    m = re.search(r"([A-Za-z]+)\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})", clean, re.I)
+    if m:
+        month = month_to_int(m.group(1))
+        day = int(m.group(2))
+        year = int(m.group(3))
+        if month:
+            return {
+                "release_date": f"{year:04d}-{month:02d}-{day:02d}",
+                "release_precision": "day",
+                "release_year": f"{year:04d}",
+                "release_month": f"{month:02d}",
+                "release_day": f"{day:02d}",
+            }
+
+    m = re.search(r"([A-Za-z]+)\s+(\d{4})", clean, re.I)
+    if m:
+        month = month_to_int(m.group(1))
+        year = int(m.group(2))
+        if month:
+            return {
+                "release_date": f"{year:04d}-{month:02d}",
+                "release_precision": "month",
+                "release_year": f"{year:04d}",
+                "release_month": f"{month:02d}",
+                "release_day": None,
+            }
+
+    m = re.search(r"\b(\d{4})\b", clean)
+    if m:
+        year = int(m.group(1))
+        return {
+            "release_date": f"{year:04d}",
+            "release_precision": "year",
+            "release_year": f"{year:04d}",
+            "release_month": None,
+            "release_day": None,
+        }
+
+    return {
+        "release_date": None,
+        "release_precision": None,
+        "release_year": None,
+        "release_month": None,
+        "release_day": None,
+    }
+
+
+# Парсинг HTML  
 
 def extract_id_from_url(url: str) -> int:
     m = re.search(r"/game/(\d+)$", url)
@@ -445,12 +634,194 @@ def merge_release_info(primary: Dict[str, Optional[str]], fallback_date: Optiona
     return out
 
 
-def parse_hltb_game_from_html(url: str, html: str) -> Optional[Dict[str, Any]]:
+def build_record(url: str,
+                 game_id: int,
+                 name: str,
+                 content_type: str,
+                 meta: Dict[str, Optional[str]],
+                 ri: Dict[str, Optional[str]],
+                 times: Dict[str, Optional[float]]) -> Dict[str, Any]:
+    now_iso = dt.datetime.now(dt.UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return {
+        "id": str(game_id),
+        "name": name,
+        "type": content_type or "game",
+        "platform": meta.get("platform"),
+        "genres": meta.get("genres"),
+        "developer": meta.get("developer"),
+        "publisher": meta.get("publisher"),
+        **ri,
+        **times,
+        "source_url": url,
+        "crawled_at": now_iso
+    }
+
+
+def normalize_content_type_from_next(value: Any) -> Optional[str]:
+    text = clean_text(value)
+    if not text:
+        return None
+    low = text.lower()
+    mapping = {
+        "game": "game",
+        "dlc": "dlc/expansion",
+        "expansion": "dlc/expansion",
+        "dlc/expansion": "dlc/expansion",
+        "multiplayer": "multiplayer focused",
+        "multiplayer focused": "multiplayer focused",
+    }
+    return mapping.get(low, low)
+
+
+def extract_next_data_payload(soup: BeautifulSoup) -> Optional[Dict[str, Any]]:
+    node = soup.find("script", attrs={"id": "__NEXT_DATA__"})
+    if not node:
+        return None
+    raw = node.string if node.string else node.get_text(strip=True)
+    if not raw:
+        return None
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def extract_first_game_from_next_data(node: Any) -> Optional[Dict[str, Any]]:
+    if isinstance(node, dict):
+        if isinstance(node.get("game_name"), str):
+            return node
+        priority_keys = ["game", "games", "data", "result", "results"]
+        for key in priority_keys:
+            if key in node:
+                found = extract_first_game_from_next_data(node.get(key))
+                if found:
+                    return found
+        for value in node.values():
+            found = extract_first_game_from_next_data(value)
+            if found:
+                return found
+        return None
+
+    if isinstance(node, list):
+        for item in node:
+            found = extract_first_game_from_next_data(item)
+            if found:
+                return found
+    return None
+
+
+def parse_times_from_next_data(game_data: Dict[str, Any]) -> Dict[str, Optional[float]]:
+    times: Dict[str, Optional[float]] = {k: None for k in TIME_KEYS + POLLED_KEYS}
+    key_map = {
+        "main_story": (["comp_main"], ["comp_main_count"]),
+        "main_plus_sides": (["comp_plus"], ["comp_plus_count"]),
+        "completionist": (["comp_100"], ["comp_100_count"]),
+        "all_styles": (["comp_all"], ["comp_all_count"]),
+        "single_player": (["invested_sp"], ["invested_sp_count"]),
+        "co_op": (["invested_co"], ["invested_co_count"]),
+        "versus": (["invested_mp"], ["invested_mp_count"]),
+    }
+
+    for out_key, (duration_keys, count_keys) in key_map.items():
+        duration_raw = first_non_empty_value(game_data, duration_keys)
+        count_raw = first_non_empty_value(game_data, count_keys)
+
+        duration_val = parse_duration_seconds(duration_raw)
+        count_val = to_int_any(count_raw)
+
+        if duration_val is not None:
+            times[out_key] = duration_val
+        if count_val and count_val > 0:
+            times[f"{out_key}_polled"] = count_val
+
+    if times.get("single_player") is None and times.get("main_story") is not None:
+        times["single_player"] = times["main_story"]
+    if times.get("single_player_polled") is None and times.get("main_story_polled") is not None:
+        times["single_player_polled"] = times["main_story_polled"]
+
+    return times
+
+
+def parse_game_from_next_data(url: str, soup: BeautifulSoup, game_id: int) -> Optional[Dict[str, Any]]:
+    payload = extract_next_data_payload(soup)
+    if not payload:
+        return None
+
+    page_props = payload.get("props", {}).get("pageProps", {})
+    game_data = None
+
+    direct = (
+        page_props.get("game", {})
+        .get("data", {})
+        .get("game", [])
+        if isinstance(page_props.get("game"), dict)
+        else None
+    )
+    if isinstance(direct, list) and direct and isinstance(direct[0], dict):
+        game_data = direct[0]
+
+    if not game_data:
+        game_data = extract_first_game_from_next_data(page_props)
+    if not game_data:
+        return None
+
+    name = clean_text(first_non_empty_value(game_data, ["game_name", "name", "title"]))
+    if not name:
+        return None
+
+    content_type = (
+        normalize_content_type_from_next(first_non_empty_value(game_data, ["game_type", "type"]))
+        or detect_content_type(soup)
+    )
+
+    meta = {
+        "platform": normalize_listish(first_non_empty_value(game_data, ["profile_platform", "platform"])),
+        "genres": normalize_listish(first_non_empty_value(game_data, ["profile_genre", "genre", "genres"])),
+        "developer": clean_text(first_non_empty_value(game_data, ["profile_dev", "developer"])),
+        "publisher": clean_text(first_non_empty_value(game_data, ["profile_pub", "publisher"])),
+    }
+    meta = normalize_meta(meta)
+    html_meta = normalize_meta(parse_meta_fields(soup))
+    for key in ("platform", "genres", "developer", "publisher"):
+        if not meta.get(key):
+            meta[key] = html_meta.get(key)
+
+    release_source = first_non_empty_value(
+        game_data,
+        ["release_world", "release_na", "release_eu", "release_jp", "release_date"]
+    )
+    release_info = parse_release_info_from_text(str(release_source)) if release_source is not None else {
+        "release_date": None,
+        "release_precision": None,
+        "release_year": None,
+        "release_month": None,
+        "release_day": None,
+    }
+    if not release_info.get("release_date"):
+        release_info = merge_release_info(parse_release_info(soup), parse_release_date_legacy(soup))
+
+    times = ensure_time_keys(parse_times_from_next_data(game_data))
+    if all(times.get(k) is None for k in TIME_KEYS):
+        html_times = parse_times_from_tables(soup)
+        if all(html_times.get(k) is None for k in TIME_KEYS):
+            html_times = parse_times_from_page(soup)
+        times = ensure_time_keys(html_times)
+
+    return build_record(url, game_id, name, content_type, meta, release_info, times)
+
+
+def parse_hltb_game_from_html(url: str, html: str) -> Tuple[Optional[Dict[str, Any]], str]:
     soup = BeautifulSoup(html, "html.parser")
+    game_id = extract_id_from_url(url)
+
+    from_next_data = parse_game_from_next_data(url, soup, game_id)
+    if from_next_data:
+        return from_next_data, "parsed_next_data"
 
     name = parse_name_from_page(soup)
     if not name:
-        return None
+        return None, "parse_no_name"
 
     content_type = detect_content_type(soup)
     meta = parse_meta_fields(soup)  # распарсили, что есть на странице
@@ -465,26 +836,11 @@ def parse_hltb_game_from_html(url: str, html: str) -> Optional[Dict[str, Any]]:
     legacy = parse_release_date_legacy(soup)
     ri = merge_release_info(ri, legacy)
 
-    game_id = extract_id_from_url(url)
-    now_iso = dt.datetime.now(dt.UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-
-    record: Dict[str, Any] = {
-        "id": str(game_id),
-        "name": name,
-        "type": content_type,
-        "platform": meta["platform"],
-        "genres": meta["genres"],
-        "developer": meta["developer"],
-        "publisher": meta["publisher"],
-        **ri,
-        **times,
-        "source_url": url,
-        "crawled_at": now_iso
-    }
-    return record
+    record = build_record(url, game_id, name, content_type, meta, ri, times)
+    return record, "parsed_html"
 
 
-# ----------------------------- Сетевой слой (async) -----------------------------
+# Сетевой слой (async)  
 
 class Fetcher:
     def __init__(self, session: ClientSession, log_file, concurrency: int, base_delay: float = 0.25, jitter: float = 0.35):
@@ -497,118 +853,47 @@ class Fetcher:
     async def polite_sleep(self):
         await asyncio.sleep(self.base_delay + random.random() * self.jitter)
 
-    async def fetch_html(self, url: str, max_attempts: int = 5) -> Optional[str]:
+    async def fetch_html(self, url: str, max_attempts: int = 5) -> Tuple[Optional[str], str]:
         attempt = 0
         backoff = 0.6
+        last_reason = "fetch_failed"
         while attempt < max_attempts:
             attempt += 1
             async with self.semaphore:
                 try:
                     async with self.session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
                         if resp.status == 404:
-                            return None
+                            return None, "http_404"
                         if resp.status in {200}:
                             text = await resp.text()
                             if text:
-                                return text
+                                return text, "ok"
+                            last_reason = "http_200_empty_body"
                         if resp.status in {429, 500, 502, 503, 504}:
+                            last_reason = f"http_{resp.status}_retryable"
                             await self._warn(url, f"retryable status {resp.status}, attempt {attempt}")
                         else:
+                            last_reason = f"http_{resp.status}"
                             await self._warn(url, f"bad status {resp.status}, attempt {attempt}")
                 except asyncio.TimeoutError:
+                    last_reason = "timeout"
                     await self._warn(url, f"timeout, attempt {attempt}")
                 except aiohttp.ClientError as e:
+                    last_reason = "client_error"
                     await self._warn(url, f"client_error={repr(e)}, attempt {attempt}")
 
             await asyncio.sleep(backoff + random.random() * 0.4)
             backoff *= 1.7
 
-        return None
+        return None, last_reason
 
     async def _warn(self, url: str, msg: str):
         log(f"[WARN] {url} — {msg}", self.log)
 
 
-# ----------------------------- Пайплайн: producer/consumer -----------------------------
+# Пайплайн: producer/consumer  
 
-async def producer(fetcher: "Fetcher",
-                   start_id: int,
-                   out_q: "asyncio.Queue[Tuple[int, Optional[Dict[str, Any]], Optional[str]]]",
-                   stop_event: asyncio.Event,
-                   end_id: Optional[int] = None):
-    i = start_id
-    while not stop_event.is_set():
-        if end_id is not None and i >= end_id:
-            break
-        url = f"https://howlongtobeat.com/game/{i}"
-        html = await fetcher.fetch_html(url)
-        if html is None:
-            await out_q.put((i, None, None))
-            await fetcher.polite_sleep()
-            i += 1
-            continue
-        try:
-            data = parse_hltb_game_from_html(url, html)
-        except Exception as e:
-            err = f"{repr(e)}\n{traceback.format_exc()}"
-            await out_q.put((i, None, err))
-            await fetcher.polite_sleep()
-            i += 1
-            continue
-
-        await out_q.put((i, data, None))
-        await fetcher.polite_sleep()
-        i += 1
-
-
-async def consumer(out_q: "asyncio.Queue[Tuple[int, Optional[Dict[str, Any]], Optional[str]]]",
-                   writer: csv.DictWriter,
-                   log_file,
-                   existing_ids: set,
-                   stop_event: asyncio.Event,
-                   miss_threshold: int):
-    processed = 0
-    consecutive_skips = 0
-    while True:
-        item = await out_q.get()
-        if item is None:
-            out_q.task_done()
-            break
-
-        game_id, data, err = item
-
-        if err:
-            log(f"[ERROR] ID {game_id} — {err}", log_file)
-            out_q.task_done()
-            continue
-
-        if data is None:
-            consecutive_skips += 1
-            log(f"[SKIP]  ID {game_id} — нет данных или 404 (streak={consecutive_skips}/{miss_threshold})", log_file)
-            if consecutive_skips >= miss_threshold and not stop_event.is_set():
-                log(f"[STOP]  Достигнут порог подряд: {miss_threshold} пропусков. Останов.", log_file)
-                stop_event.set()
-            out_q.task_done()
-            continue
-
-        consecutive_skips = 0
-
-        if data["id"] in existing_ids:
-            log(f"[DUP]   ID {game_id} — пропущен (уже есть в CSV)", log_file)
-            out_q.task_done()
-            continue
-
-        writer.writerow(data)
-        existing_ids.add(data["id"])
-        log(f"[OK]    ID {game_id} — {data.get('name')}", log_file)
-
-        processed += 1
-        if processed % 100 == 0:
-            log_file.flush()
-        out_q.task_done()
-
-
-# ----------------------------- Вспомогательные функции -----------------------------
+# Вспомогательные функции  
 
 def read_existing_ids(csv_path: str) -> set:
     ids = set()
@@ -641,7 +926,7 @@ async def producer_worker(worker_idx: int,
                           stride: int,
                           fetcher: "Fetcher",
                           start_id: int,
-                          out_q: "asyncio.Queue[Tuple[int, Optional[Dict[str, Any]], Optional[str]]]",
+                          out_q: "asyncio.Queue[Optional[QueueItem]]",
                           stop_event: asyncio.Event,
                           end_id: Optional[int] = None):
     i = start_id + worker_idx
@@ -649,27 +934,30 @@ async def producer_worker(worker_idx: int,
         if end_id is not None and i >= end_id:
             break
         url = f"https://howlongtobeat.com/game/{i}"
-        html = await fetcher.fetch_html(url)
+        html, fetch_reason = await fetcher.fetch_html(url)
         if html is None:
-            await out_q.put((i, None, None))
+            await out_q.put((i, None, None, fetch_reason))
             await fetcher.polite_sleep()
             i += stride
             continue
         try:
-            data = parse_hltb_game_from_html(url, html)
+            data, parse_reason = parse_hltb_game_from_html(url, html)
         except Exception as e:
             err = f"{repr(e)}\n{traceback.format_exc()}"
-            await out_q.put((i, None, err))
+            await out_q.put((i, None, err, "parse_exception"))
             await fetcher.polite_sleep()
             i += stride
             continue
 
-        await out_q.put((i, data, None))
+        if data is None:
+            await out_q.put((i, None, None, parse_reason))
+        else:
+            await out_q.put((i, data, None, None))
         await fetcher.polite_sleep()
         i += stride
 
 
-async def consumer(out_q: "asyncio.Queue[Tuple[int, Optional[Dict[str, Any]], Optional[str]]]",
+async def consumer(out_q: "asyncio.Queue[Optional[QueueItem]]",
                    writer: csv.DictWriter,
                    log_file,
                    existing_ids: set,
@@ -690,12 +978,12 @@ async def consumer(out_q: "asyncio.Queue[Tuple[int, Optional[Dict[str, Any]], Op
             producers_done = True
             out_q.task_done()
         else:
-            game_id, data, err = item
+            game_id, data, err, skip_reason = item
             if err:
                 log(f"[ERROR] ID {game_id} — {err}", log_file)
-                buffer[game_id] = (None, None)  # помечаем как пропуск, чтобы не блокировать порядок
+                buffer[game_id] = (None, "error")
             else:
-                buffer[game_id] = (data, None)
+                buffer[game_id] = (data, skip_reason)
             out_q.task_done()
 
         # Пишем непрерывный префикс начиная с expected
@@ -704,10 +992,11 @@ async def consumer(out_q: "asyncio.Queue[Tuple[int, Optional[Dict[str, Any]], Op
             if entry is None:
                 break
 
-            data, _ = entry
+            data, skip_reason = entry
             if data is None:
                 consecutive_skips += 1
-                log(f"[SKIP]  ID {expected} — нет данных или 404 (streak={consecutive_skips}/{miss_threshold})", log_file)
+                reason = skip_reason or "no_data_or_404"
+                log(f"[SKIP]  ID {expected} — {reason} (streak={consecutive_skips}/{miss_threshold})", log_file)
                 if consecutive_skips >= miss_threshold and not stop_event.is_set():
                     log(f"[STOP]  Достигнут порог подряд: {miss_threshold} пропусков. Останов.", log_file)
                     stop_event.set()
@@ -732,7 +1021,7 @@ async def consumer(out_q: "asyncio.Queue[Tuple[int, Optional[Dict[str, Any]], Op
             break
 
 
-# ----------------------------- Точка входа -----------------------------
+# Точка входа  
 
 
 async def main_async(args):
@@ -767,7 +1056,7 @@ async def main_async(args):
         "Connection": "keep-alive",
     }
 
-    out_q: asyncio.Queue = asyncio.Queue(maxsize=concurrency * 8)
+    out_q: "asyncio.Queue[Optional[QueueItem]]" = asyncio.Queue(maxsize=concurrency * 8)
     stop_event = asyncio.Event()
     miss_threshold = int(args.miss_threshold)
 
