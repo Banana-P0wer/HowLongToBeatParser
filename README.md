@@ -20,11 +20,11 @@ Saves data to `hltb_dataset.csv` and writes logs about errors, skips, timeouts, 
 
 ## How to run
 
-Install all deps
+### Install all deps
 ```bash
 pip install -r requirements.txt
 ```
-Run the parsing process. For example, for the command:
+### Run the parsing process. For example, for the command:
 ```bash
 python main.py 1000 --start 1 --concurrency 8 --miss-threshold 200
 ```
@@ -33,18 +33,29 @@ python main.py 1000 --start 1 --concurrency 8 --miss-threshold 200
 (if `--start` is not set, it will start from the last ID in the CSV + 1)
 - `--concurrency 8` = up to 8 simultaneous HTTP requests
 (these are not OS threads, but asynchronous tasks using asyncio)
-- `--miss-threshold 200` = the number of failed attempts in a row. If 200 id in a row return a 404 error, the program will assume there are no more games and stop (since the id of the last added game on the site constantly changes, this method is much simpler than trying to determine the latest id every time).
+- `--miss-threshold 200` = the number of failed attempts in a row. If 200 id in a row return a 404 error, the program will assume there are no more games and stop (since the id of the last added game on the site constantly changes, this method is much simpler than trying to determine the latest id every time)
+- `--workers` = number of ID workers, i.e. how many parallel logic threads are used to iterate over IDs (by default equals concurrency)
+- `--csv` = path to the output CSV file
+- `--log` = path to the log file
 
-The final range will be 1 to 1000 (inclusive).
-These 1000 include skipped IDs and 404 pages, not only found games.
-
-
+The final range will be 1 to 1000 (inclusive)
+These 1000 include skipped IDs and 404 pages, not only found games 
 
 You can also run it without a limit:
 ```bash
 python main.py "*" --concurrency 8
 ```
-It will stop when it reaches the miss limit (default is 400 misses in a row).
+It will stop when it reaches the miss limit (default is 400 misses in a row)
+
+### Filter the dataset using filter.py.
+```bash
+python filter.py --src hltb_dataset.csv --out-dir data --chunksize 100000
+```
+- `--src hltb_dataset.csv` = path to the source CSV file that needs to be processed
+- `--out-dir data` = folder where the results will be saved
+- `--chunksize 100000` = chunk size for streaming normalization (the file is processed in parts of 100 000 rows instead of all at once). A larger value means faster processing, but higher RAM usage
+
+The script always creates two files: `hltb_dataset_normalized.csv` and `hltb_dataset_filtered.csv`. During the filtering step, the normalized file is loaded fully into memory, so large files require enough RAM. The normalized file is written in append mode, which means if you run the script again without clearing it first, duplicate rows may be added
 
 ## Features
 
