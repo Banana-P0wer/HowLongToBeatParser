@@ -998,7 +998,7 @@ async def consumer(out_q: "asyncio.Queue[Optional[QueueItem]]",
                 reason = skip_reason or "no_data_or_404"
                 log(f"[SKIP]  ID {expected} — {reason} (streak={consecutive_skips}/{miss_threshold})", log_file)
                 if consecutive_skips >= miss_threshold and not stop_event.is_set():
-                    log(f"[STOP]  Достигнут порог подряд: {miss_threshold} пропусков. Останов.", log_file)
+                    log(f"[STOP]  Достигнут порог подряд: {miss_threshold} пропусков. Остановка", log_file)
                     stop_event.set()
             else:
                 consecutive_skips = 0
