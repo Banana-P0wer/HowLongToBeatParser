@@ -83,7 +83,7 @@ def coerce_dtypes_inplace(df: pd.DataFrame) -> None:
 
 
 def filter_dataframe(df: pd.DataFrame) -> tuple[pd.DataFrame, int, int, List[str]]:
-    """Удаляет строки, где все метрики пустые, и убирает служебные столбцы."""
+    """Удаляет пустые по метрикам строки, аномальные годы и служебные столбцы."""
     missing = [c for c in METRICS_COLS if c not in df.columns]
     if missing:
         raise ValueError(f"Отсутствуют столбцы: {missing}")
@@ -95,6 +95,12 @@ def filter_dataframe(df: pd.DataFrame) -> tuple[pd.DataFrame, int, int, List[str
             sub[c] = s.astype("string").str.strip().replace("", pd.NA)
     mask_all_empty = sub.isna().all(axis=1)
     df = df.loc[~mask_all_empty].copy()
+
+    # Убираем аномальные даты релиза (например, 0, 1900).
+    if "release_year" in df.columns:
+        mask_invalid_year = df["release_year"].notna() & (df["release_year"] < 1945)
+        df = df.loc[~mask_invalid_year].copy()
+
     after = len(df)
     present_to_drop = [c for c in SERVICE_COLS if c in df.columns]
     df.drop(columns=SERVICE_COLS, errors="ignore", inplace=True)
